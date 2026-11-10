@@ -1,0 +1,20 @@
+{
+	"name": "pi-pentest",
+	"private": true,
+	"version": "0.2.0",
+	"type": "module",
+	"description": "基于 pi 框架的多 Agent 渗透测试平台（最小 demo）：主 agent 派发子 agent，共享事实库，WebUI 可对话/看推理",
+	"workspaces": [
+		"apps/web"
+	],
+	"scripts": {
+		"dev": "node scripts/dev.mjs",
+		"server": "node apps/server/src/index.mjs",
+		"web": "npm run dev --workspace @pi-pentest/web",
+		"build": "npm run build --workspace @pi-pentest/web",
+		"start": "node apps/server/src/index.mjs"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

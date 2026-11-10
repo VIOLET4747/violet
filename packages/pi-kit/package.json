@@ -1,0 +1,7 @@
+{
+	"name": "@pi-pentest/pi-kit",
+	"private": true,
+	"version": "0.0.1",
+	"description": "pi 扩展：渗透测试平台的全部业务工具与 hooks（M0 最小版）",
+	"type": "module"
+}

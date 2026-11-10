@@ -1,0 +1,10 @@
+{
+	"name": "@pi-pentest/agent-runtime",
+	"private": true,
+	"type": "module",
+	"version": "0.0.1",
+	"main": "src/index.mjs",
+	"exports": {
+		".": "./src/index.mjs"
+	}
+}
