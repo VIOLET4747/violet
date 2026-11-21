@@ -9,6 +9,7 @@
  *   - 支持用户对任意 agent 用自然语言继续对话（运行中 steer、空闲 prompt）
  */
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { PiRpcClient, waitForPiReady } from "../../../packages/agent-runtime/src/index.mjs";
 import {
