@@ -113,7 +113,12 @@ export function openStore(path) {
 		listFacts: db.prepare("SELECT * FROM fact WHERE project_id = ? ORDER BY seq ASC"),
 		getFact: db.prepare("SELECT * FROM fact WHERE id = ?"),
 		factsByAgent: db.prepare("SELECT * FROM fact WHERE project_id = ? AND source_agent = ? ORDER BY seq ASC"),
-		maxFactSeq: db.prepare("SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM fact WHERE project_id = ?"),
+		maxFactSeq: db.prepare("SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM fact"),
+
+		deleteProject: db.prepare("DELETE FROM project WHERE id = ?"),
+		deleteProjectFacts: db.prepare("DELETE FROM fact WHERE project_id = ?"),
+		deleteProjectEvents: db.prepare("DELETE FROM agent_event WHERE project_id = ?"),
+		deleteProjectAgents: db.prepare("DELETE FROM agent_run WHERE project_id = ?"),
 	};
 
 	return {
@@ -130,6 +135,12 @@ export function openStore(path) {
 		},
 		listProjects() {
 			return stmts.listProjects.all().map(parseProject);
+		},
+		deleteProject(id) {
+			stmts.deleteProjectFacts.run(id);
+			stmts.deleteProjectEvents.run(id);
+			stmts.deleteProjectAgents.run(id);
+			stmts.deleteProject.run(id);
 		},
 
 		createAgent(agent) {
@@ -191,20 +202,44 @@ export function openStore(path) {
 		},
 
 		addFact(fact) {
-			const seq = (stmts.maxFactSeq.get(fact.projectId)?.maxSeq ?? 0) + 1;
-			const id = fact.id ?? `fact-${String(seq).padStart(4, "0")}`;
-			stmts.insertFact.run(
-				id,
-				fact.projectId,
-				seq,
-				fact.kind,
-				fact.title,
-				JSON.stringify(fact.value ?? {}),
-				fact.confidence ?? 0.5,
-				fact.sourceAgent ?? null,
-				now(),
-			);
-			return this.getFact(id);
+			// fact.id 是全局主键，所以 seq 必须全局递增（不能按项目各自从 1 开始，否则第二个项目必然撞主键）
+			if (fact.id) {
+				stmts.insertFact.run(
+					fact.id,
+					fact.projectId,
+					fact.seq ?? 0,
+					fact.kind,
+					fact.title,
+					JSON.stringify(fact.value ?? {}),
+					fact.confidence ?? 0.5,
+					fact.sourceAgent ?? null,
+					now(),
+				);
+				return this.getFact(fact.id);
+			}
+
+			for (let attempt = 0; attempt < 5; attempt++) {
+				const seq = (stmts.maxFactSeq.get()?.maxSeq ?? 0) + 1;
+				const id = `fact-${String(seq).padStart(4, "0")}`;
+				try {
+					stmts.insertFact.run(
+						id,
+						fact.projectId,
+						seq,
+						fact.kind,
+						fact.title,
+						JSON.stringify(fact.value ?? {}),
+						fact.confidence ?? 0.5,
+						fact.sourceAgent ?? null,
+						now(),
+					);
+					return this.getFact(id);
+				} catch (error) {
+					// 理论上单进程不会撞；多进程/并发写时重算一次
+					if (!String(error?.message ?? "").includes("UNIQUE") || attempt === 4) throw error;
+				}
+			}
+			throw new Error("无法分配 fact id");
 		},
 		getFact(id) {
 			const row = stmts.getFact.get(id);

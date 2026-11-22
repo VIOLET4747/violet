@@ -64,7 +64,16 @@ async function fetchBrief(force = false): Promise<string> {
 export default function piKit(pi: ExtensionAPI): void {
 	log("extension_loaded", { pid: process.pid, projectId: PROJECT_ID });
 
-	pi.on("session_start", () => log("session_start"));
+	// 会话启动时把 brief 快照写进会话树（只做审计，不进模型上下文）
+	pi.on("session_start", async () => {
+		log("session_start");
+		try {
+			const brief = await fetchBrief(true);
+			pi.appendEntry("pentest.brief", { at: Date.now(), brief });
+		} catch (error) {
+			log("brief_entry_error", { error: String(error) });
+		}
+	});
 
 	// 把简报作为 system prompt 的附加段注入（不整段替换，保留 pi 的缓存与 transcript 增量）
 	pi.on("before_agent_start", async (event) => {

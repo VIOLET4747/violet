@@ -2,11 +2,43 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageView } from "./MessageView.jsx";
 
 const ROLE_LABELS = { commander: "指挥官", recon: "侦察员", jwt: "JWT 专家" };
-const STATUS_LABELS = { running: "运行中", idle: "空闲", starting: "启动中", error: "错误", aborted: "已中止" };
+const STATUS_LABELS = {
+	running: "运行中",
+	idle: "空闲",
+	starting: "启动中",
+	queued: "排队中",
+	interrupted: "已中断",
+	failed: "失败",
+	error: "错误",
+	aborted: "已中止",
+};
 
-export function Conversation({ agent, messages, showThinking, setShowThinking, onSend, onAbort, onPopout }) {
+function formatElapsed(ms) {
+	const total = Math.max(0, Math.round(ms / 1000));
+	if (total < 60) return `${total}s`;
+	const minutes = Math.floor(total / 60);
+	const seconds = total % 60;
+	return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+}
+
+function useElapsed(agent) {
+	const [, tick] = useState(0);
+	const running = agent?.status === "running";
+	useEffect(() => {
+		if (!running) return undefined;
+		const timer = setInterval(() => tick((value) => value + 1), 1000);
+		return () => clearInterval(timer);
+	}, [running, agent?.id]);
+	if (!agent?.startedAt) return "";
+	const end = running ? Date.now() : agent.endedAt;
+	if (!end || end < agent.startedAt) return "";
+	return formatElapsed(end - agent.startedAt);
+}
+
+export function Conversation({ agent, messages, showThinking, setShowThinking, onSend, onAbort, onPopout, onResume }) {
 	const [text, setText] = useState("");
 	const [sending, setSending] = useState(false);
+	const [resuming, setResuming] = useState(false);
 	const [error, setError] = useState("");
 	const scrollRef = useRef(null);
 	const stickRef = useRef(true);
@@ -20,6 +52,7 @@ export function Conversation({ agent, messages, showThinking, setShowThinking, o
 	}, [messages]);
 
 	const streaming = agent?.status === "running";
+	const elapsed = useElapsed(agent);
 
 	useEffect(() => {
 		setText("");
@@ -54,6 +87,19 @@ export function Conversation({ agent, messages, showThinking, setShowThinking, o
 		}
 	}
 
+	async function resume() {
+		if (!onResume) return;
+		setResuming(true);
+		setError("");
+		try {
+			await onResume(agent.id);
+		} catch (err) {
+			setError(String(err?.message ?? err));
+		} finally {
+			setResuming(false);
+		}
+	}
+
 	if (!agent) return <div className="center-note">选择左侧的 agent</div>;
 
 	return (
@@ -63,7 +109,10 @@ export function Conversation({ agent, messages, showThinking, setShowThinking, o
 					<span className={`dot ${agent.status}`} />
 					<span>{ROLE_LABELS[agent.role] ?? agent.role}</span>
 					<span className="chat-id">{agent.id}</span>
-					{streaming ? <span className="chat-state">运行中</span> : null}
+					{elapsed ? <span className="chat-elapsed">{elapsed}</span> : null}
+					{agent.status !== "idle" ? (
+						<span className={`chat-state ${agent.status}`}>{STATUS_LABELS[agent.status] ?? agent.status}</span>
+					) : null}
 				</div>
 				<div className="chat-actions">
 					<label className="check">
@@ -77,6 +126,11 @@ export function Conversation({ agent, messages, showThinking, setShowThinking, o
 					{onPopout ? (
 						<button className="icon" title="独立窗口" onClick={() => onPopout(agent)}>
 							⧉
+						</button>
+					) : null}
+					{agent.status === "interrupted" && onResume ? (
+						<button className="resume-btn" onClick={() => resume()} disabled={resuming}>
+							{resuming ? "恢复中…" : "恢复会话"}
 						</button>
 					) : null}
 					{streaming ? (

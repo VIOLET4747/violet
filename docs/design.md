@@ -1298,67 +1298,77 @@ CLI: --mode rpc|json|print  --tools --exclude-tools --no-builtin-tools
 
 #### M1（5-7 天）：主→子调度闭环 ★核心
 
+> **状态（收口）**：已实现并通过仓库外固定验收脚本（`pi-pentest-acceptance/run.mjs`），连续 5 轮 45/45 通过。
+> 与下文计划的差异：广播用 **SSE** 而非 WS；用 `node:sqlite` 自动建表，**没有迁移脚本**；
+> 不再自动 seed 演示项目（改为 UI 手动新建）。
+
 **数据层（1 天）**
 ```
-[ ] SQLite + drizzle：project / agent_run / agent_event / fact 四张表
-[ ] 迁移脚本 + 一个 seed 项目
+[x] SQLite + node:sqlite：project / agent_run / agent_event / fact 四张表
+[x] 启动时自动建表（无独立迁移脚本）；项目由 UI 手动创建（不再 seed）
 ```
 
 **运行时（1.5 天）**
 ```
-[ ] AgentHandle：spawn(args) → 读 JSONL → 状态机(queued→running→settled|failed|aborted)
-[ ] AgentSupervisor：Map<agentId, handle>；并发上限 4；级联 abort
-[ ] 完成判定：等 agent_settled；异常/超时兜底
-[ ] 事件写入 agent_event（seq 单调），同时进 EventBus
+[x] AgentHandle：spawn(args) → 读 JSONL → 状态机(queued→starting→running→idle|failed|aborted)
+[x] AgentSupervisor：Map<agentId, ctx>；并发上限（默认 4，超出排队）；中止父 agent 级联中止子树
+[x] 完成判定：等 agent_settled；墙钟超时 + 心跳兜底；失败如实标记 failed
+[x] 事件写入 agent_event（自增 id 单调），同时广播
 ```
 
 **pi-kit 最小版（1.5 天）**
 ```
-[ ] dispatch_agent 工具：POST /internal/agents，立即返回 agent_id
-[ ] fact_write / fact_query 工具：读写 /internal/facts
-[ ] session_start：拉 brief → appendEntry（持久化不进上下文）
-[ ] before_agent_start：把 brief 拼进 systemPrompt（缓存 60s）
-[ ] 按 PENTEST_ROLE 用 --tools 收紧工具面（commander 无 bash）
+[x] dispatch_agent 工具：POST /internal/dispatch，立即返回 agent_id
+[x] fact_write / fact_query 工具：读写 /internal/facts
+[x] session_start：拉 brief → appendEntry（只做审计，不进上下文）
+[x] before_agent_start：把 brief 拼进 systemPrompt（缓存 15s）
+[x] 按 PENTEST_ROLE 用 --tools 收紧工具面（commander 无 shell）
 ```
 
 **编排（1 天）**
 ```
-[ ] POST /internal/agents → 入队 → spawn 子进程
-[ ] 子 agent settled → 落库 → 给父 agent 发 RPC prompt（唤醒）
-[ ] 唤醒消息模板：结构化摘要（≤1500 字 + fact id 列表），60s 内批量合并
+[x] POST /internal/dispatch → 入队 → spawn 子进程（受并发上限约束）
+[x] 子 agent settled → 落库 → 给父 agent 发 RPC prompt（唤醒）
+[x] 唤醒消息模板：结构化摘要 + fact id 列表；父 agent 空闲时防抖合并，忙碌时排队
 ```
 
 **接口与 UI（1.5 天）**
 ```
-[ ] WS 广播：agent.spawned / status / message.delta / tool.* / completed
-[ ] 前端：左 agent 树（父子缩进 + 状态点 + 耗时），右 transcript（文本 + 工具卡片）
-[ ] 点树节点切换 transcript；支持 abort 按钮
+[x] SSE 广播：agent.created / agent.updated / message.* / tool.* / fact.created
+[x] 前端：左 agent 树（父子缩进 + 状态点 + 运行时长），transcript（文本 + 工具卡片）
+[x] 点树节点切换 transcript；支持 abort（级联中止子树）
+[x] 事实库面板（左下角入口，展示 id / 类型 / 标题 / 详情）
 ```
 
 **M1 验收脚本（固定输入，必须可重复）**
 ```
-用户：审计 http://mock-target:8080，确认登录接口是否用 JWT；若是，派子 agent 检查 HS256 密钥强度
-
-期望链路：
-  1. commander 派 recon-1
-  2. recon-1 发现 POST /api/login + JWT(HS256)，写 fact-001 / fact-002
-  3. commander 被唤醒，fact_query 看到 JWT 事实
-  4. commander 派 auth-1，inputs.fact_ids=[fact-002]
-  5. auth-1 读事实、暴力破解密钥、写 fact-003（密钥=secret）
-  6. commander 收到两条通知，输出结论 + 引用 fact id
-  7. UI 上可见 3 个 agent 节点，各自 transcript 完整，facts 面板显示 3 条
+仓库外固定脚本：D:\Users\27973\Desktop\pi-pentest-acceptance\run.mjs
+每轮：建项目 → 等链路完成 → 断言 →
+  1. 主 agent 已创建
+  2. 出现子 agent（≥1）
+  3. 子 agent 写入事实（≥1）
+  4. 父 agent 收到系统通知
+  5. 父 agent 在通知后给出最终结论
+  6. 没有 failed / error 的 agent
+  7. 会话目录只含 .jsonl，workspace/ 存在
+→ 删除项目，可反复跑；--runs=5 满足闸口"连续 5 轮"
 ```
 > **M1 故意不做**：审批、容器、报告、MCP、skills、多项目、登录鉴权。工具只有 `bash` + 4 个平台工具。
 
 #### M2（4 天）：可靠性
 
+> **状态（收口）**：已实现。仓库外验收脚本 `pi-pentest-acceptance/run-m2.mjs`（隔离 runtime + 端口 8799），
+> 覆盖「低预算 → failed + Handoff → 父 agent 收到交接通知」「8s 墙钟超时 → failed + Handoff」「硬杀服务 → 重启 → interrupted → resume → 继续对话」，16/16 通过。
+> 差异：重启恢复是**手动 resume**（点「恢复会话」），没有自动续跑；事件回放复用 SSE `after` + REST 消息，流式 delta 仍不落库。
+> 预算的 **UI 进度条**不在 M2，放到 M3（见下）。
+
 ```
-[ ] 预算：每 agent maxTurns/maxMinutes/maxTokens，到限 abort + 生成 Handoff Note
-[ ] 超时：墙钟 + 无输出心跳（心跳 3min 断 → 判定卡死 → kill 进程组）
-[ ] 重启恢复：agent_run 状态机持久化；启动时把 running 标记为 interrupted，可 resume/重派
-[ ] 事件回放：WS 带 lastSeq，前端刷新/重连后补齐
-[ ] 失败语义：failed 不让父 agent 感知为 completed；错误摘要进唤醒消息
-[ ] 验收：kill -9 server → 重启 → 前端恢复全部历史 + 任务可继续；子 agent 假死被超时终止
+[x] 预算：每 agent maxTurns / maxTokens（墙钟已有），软提醒（80%）+ 硬中止 + Handoff Note
+[x] 超时：墙钟 + 无输出心跳（默认 5min 无事件判定卡死）；只有运行中才计时，空闲不误杀
+[x] 重启恢复：启动时把 running/starting/queued 标记为 interrupted；POST /api/agents/:id/resume 用 switch_session 恢复原会话
+[x] 事件回放：SSE `after=<id>` 补发已落库事件；刷新后走 REST 重新拉取消息（delta 不落库）
+[x] 失败语义：failed 不再被当成 completed；失败原因 + 交接说明进入唤醒消息
+[x] 验收：run-m2.mjs（预算 4 轮触发；kill -9 后重启、历史完整、interrupted、resume、继续对话）
 ```
 
 #### M3（5 天）：工具与上下文
@@ -1369,7 +1379,17 @@ CLI: --mode rpc|json|print  --tools --exclude-tools --no-builtin-tools
 [ ] 三个真实工具：nmap / httpx / nuclei（先宿主执行，M3 末切容器）
 [ ] 输出截断：>8KB 落盘，模型只看到尾部 + artifact 句柄；read_artifact 工具
 [ ] 容器执行：覆盖 bash 的 BashOperations → docker exec（参考 examples/extensions/ssh.ts）
-[ ] 验收：`nmap -p-` 输出 3MB 不炸上下文；UI 加一个自定义 YAML 工具，下一轮可用
+[ ] 预算进度条：agent 列表 / 会话头展示 turns 与 tokens 使用率
+    - 数据源：SSE `agent.updated` 已带 turns/tokensIn/tokensOut；上限取 `/api/health.limits`
+    - 80% 变黄（软提醒已发）、100% 变红并显示 Handoff 原因；失败/中断状态也要能看
+    - resume 后标注「累计继承」，避免误以为恢复后预算重置
+    - 不需要新后端接口：使用量来自 `agent.updated` 的 turns/tokensIn/tokensOut，上限来自 `/api/health.limits`；只有"按角色给不同预算"时才需要在 agent 视图里补 budget 字段
+[ ] 多目标建模（方案 B，2026-11-22 决策）
+    - target 实体：id / 类型(domain/url/ip/cidr) / 状态(pending/running/done) / 优先级 / scope
+    - fact / finding / coverage 增加 targetId；简报按目标列出清单与状态
+    - 报告按目标分章；调度器按目标轮转或并发；审批/scope 校验按 target 执行
+    - 方案 A（项目 targets 数组 + UI 多行输入）**暂缓，不实现**；当前项目仍是单 target 字段，多目标只靠模型自行理解
+[ ] 验收补充：agent 跑到 80% 时 UI 进度条变黄；预算耗尽后显示 failed + 交接原因
 ```
 > 到 M3 结束，这套东西已经能对**授权靶场**做真实侦察了。
 

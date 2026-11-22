@@ -3,7 +3,8 @@ import { api } from "./api.js";
 import { applyDelta, normalizeMessage, upsertMessage } from "./normalize.js";
 import { AgentList } from "./components/AgentTree.jsx";
 import { Conversation } from "./components/Conversation.jsx";
-import { NewProjectDialog, SettingsDialog } from "./components/Dialogs.jsx";
+import { NewProjectDialog, FactsDialog } from "./components/Dialogs.jsx";
+import { SettingsPage } from "./components/SettingsPage.jsx";
 import { ModelSetup } from "./components/ModelSetup.jsx";
 
 function useProjectStream(projectId, onEvent, enabled = true) {
@@ -66,13 +67,17 @@ function MainApp({ streamEnabled = true }) {
 	const [projects, setProjects] = useState([]);
 	const [projectId, setProjectId] = useState(null);
 	const [agents, setAgents] = useState([]);
+	const [facts, setFacts] = useState([]);
 	const [selectedId, setSelectedId] = useState(null);
 	const [messagesByAgent, setMessagesByAgent] = useState({});
 	const [loadedAgents, setLoadedAgents] = useState(() => new Set());
 	const [showThinking, setShowThinking] = useState(true);
 	const [showSettings, setShowSettings] = useState(false);
 	const [showNewProject, setShowNewProject] = useState(false);
+	const [showFacts, setShowFacts] = useState(false);
 	const [error, setError] = useState("");
+	const [backendOnline, setBackendOnline] = useState(true);
+	const wasOffline = useRef(false);
 
 	const selectedAgent = agents.find((item) => item.id === selectedId) ?? null;
 	const messages = selectedId ? messagesByAgent[selectedId] ?? [] : [];
@@ -91,17 +96,47 @@ function MainApp({ streamEnabled = true }) {
 			.catch((err) => setError(String(err?.message ?? err)));
 	}, []);
 
+	// 后端健康检查：断开时给出可操作的提示，恢复后自动刷新
+	useEffect(() => {
+		let stopped = false;
+		const check = async () => {
+			try {
+				await api.get("/api/health");
+				if (stopped) return;
+				setBackendOnline(true);
+				if (wasOffline.current) {
+					wasOffline.current = false;
+					window.location.reload();
+				}
+			} catch {
+				if (stopped) return;
+				wasOffline.current = true;
+				setBackendOnline(false);
+			}
+		};
+		check();
+		const timer = setInterval(check, 5000);
+		return () => {
+			stopped = true;
+			clearInterval(timer);
+		};
+	}, []);
+
 	useEffect(() => {
 		if (!projectId) return;
 		setAgents([]);
+		setFacts([]);
 		setSelectedId(null);
 		setMessagesByAgent({});
 		setLoadedAgents(new Set());
-		api
-			.get(`/api/projects/${projectId}/agents`)
-			.then((data) => {
-				setAgents(data.agents);
-				const root = data.agents.find((item) => !item.parentId) ?? data.agents[0];
+		Promise.all([
+			api.get(`/api/projects/${projectId}/agents`),
+			api.get(`/api/projects/${projectId}/facts`),
+		])
+			.then(([agentData, factData]) => {
+				setAgents(agentData.agents);
+				setFacts(factData.facts);
+				const root = agentData.agents.find((item) => !item.parentId) ?? agentData.agents[0];
 				if (root) setSelectedId(root.id);
 			})
 			.catch((err) => setError(String(err?.message ?? err)));
@@ -134,6 +169,10 @@ function MainApp({ streamEnabled = true }) {
 			const normalized = normalizeMessage(payload.id, payload.message);
 			if (!normalized) return;
 			setMessagesByAgent((prev) => ({ ...prev, [agentId]: upsertMessage(prev[agentId] ?? [], normalized) }));
+			return;
+		}
+		if (type === "fact.created") {
+			setFacts((prev) => (prev.some((item) => item.id === payload.fact.id) ? prev : [...prev, payload.fact]));
 		}
 	}, []);
 
@@ -162,6 +201,11 @@ function MainApp({ streamEnabled = true }) {
 		await api.post(`/api/agents/${selectedId}/messages`, { text });
 	}
 
+	async function resumeAgent(agentId) {
+		const data = await api.post(`/api/agents/${agentId}/resume`, {});
+		setAgents((prev) => prev.map((item) => (item.id === agentId ? data.agent : item)));
+	}
+
 	function popout(item) {
 		window.open(
 			`${window.location.origin}/?agent=${item.id}&project=${projectId}`,
@@ -170,13 +214,28 @@ function MainApp({ streamEnabled = true }) {
 		);
 	}
 
-	if (error) return <div className="center-note error-text">{error}</div>;
+	if (error) {
+		return (
+			<div className="center-note">
+				<div className="error-text">{error}</div>
+				<button className="primary" onClick={() => window.location.reload()}>
+					重试
+				</button>
+			</div>
+		);
+	}
 	if (!config) return <div className="center-note">加载中…</div>;
 	if (!config.configured) return <ModelSetup config={config} onSaved={setConfig} />;
 
 	return (
-		<div className="layout">
-			<aside className="sidebar">
+		<>
+			{!backendOnline ? (
+				<div className="offline-banner">
+					后端服务未连接（127.0.0.1:8787）。请在项目目录运行 <code>npm run dev</code>，恢复后本页会自动刷新。
+				</div>
+			) : null}
+			<div className={`layout ${backendOnline ? "" : "offline"}`}>
+				<aside className="sidebar">
 				<div className="side-brand">Pi-Pentest</div>
 
 				<div className="side-projects">
@@ -192,7 +251,12 @@ function MainApp({ streamEnabled = true }) {
 							</option>
 						))}
 					</select>
-					<button className="icon" title="新建项目" onClick={() => setShowNewProject(true)}>
+					<button
+						className="icon"
+						title={backendOnline ? "新建项目" : "后端未连接"}
+						onClick={() => backendOnline && setShowNewProject(true)}
+						disabled={!backendOnline}
+					>
 						＋
 					</button>
 				</div>
@@ -202,6 +266,10 @@ function MainApp({ streamEnabled = true }) {
 				</div>
 
 				<div className="side-foot">
+					<button className="foot-btn" onClick={() => setShowFacts(true)}>
+						<span>事实库</span>
+						<span className="fact-count">{facts.length}</span>
+					</button>
 					<button className="foot-btn" onClick={() => setShowSettings(true)}>
 						<span className={`dot ${streamEnabled ? streamStatus : "live"}`} />
 						<span className="model-name">
@@ -217,7 +285,11 @@ function MainApp({ streamEnabled = true }) {
 					<div className="center-note">
 						<div className="note-title">还没有 agent</div>
 						<div className="note-sub">新建一个项目开始</div>
-						<button className="primary" onClick={() => setShowNewProject(true)}>
+						<button
+							className="primary"
+							onClick={() => backendOnline && setShowNewProject(true)}
+							disabled={!backendOnline}
+						>
 							新建项目
 						</button>
 					</div>
@@ -230,13 +302,15 @@ function MainApp({ streamEnabled = true }) {
 						onSend={sendMessage}
 						onAbort={(id) => api.post(`/api/agents/${id}/abort`, {})}
 						onPopout={popout}
+						onResume={resumeAgent}
 					/>
 				)}
 			</main>
 
 			{showSettings ? (
-				<SettingsDialog config={config} onClose={() => setShowSettings(false)} onSaved={setConfig} />
+				<SettingsPage config={config} onClose={() => setShowSettings(false)} onSaved={setConfig} />
 			) : null}
+			{showFacts ? <FactsDialog facts={facts} onClose={() => setShowFacts(false)} /> : null}
 			{showNewProject ? (
 				<NewProjectDialog
 					configured={config.configured}
@@ -248,7 +322,8 @@ function MainApp({ streamEnabled = true }) {
 					}}
 				/>
 			) : null}
-		</div>
+			</div>
+		</>
 	);
 }
 
@@ -303,6 +378,10 @@ function StandaloneAgent({ agentId, projectId, streamEnabled = true }) {
 					onSend={async (text) => api.post(`/api/agents/${agentId}/messages`, { text })}
 					onAbort={async (id) => api.post(`/api/agents/${id}/abort`, {})}
 					onPopout={null}
+					onResume={async (id) => {
+						const data = await api.post(`/api/agents/${id}/resume`, {});
+						setAgent(data.agent);
+					}}
 				/>
 			) : (
 				<div className="center-note">加载中…</div>

@@ -7,9 +7,11 @@
  *   - agent 调度（每个 agent 是一个 pi RPC 子进程）
  */
 import { createServer } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
+import { readFile, rm, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import {
+	LIMITS,
 	SERVER_HOST,
 	SERVER_PORT,
 	WEB_DIST,
@@ -23,14 +25,25 @@ import {
 	writeModelsJson,
 } from "./config.mjs";
 import { openStore } from "../../../packages/db/src/index.mjs";
-import { Supervisor } from "./supervisor.mjs";
-import { DB_PATH } from "./config.mjs";
+import { Supervisor, seedIdCounter } from "./supervisor.mjs";
+import { DB_PATH, RUNTIME } from "./config.mjs";
 
 ensureRuntimeDirs();
 writeModelsJson();
 
 const store = openStore(DB_PATH);
+seedIdCounter(store);
 const sseClients = new Set();
+
+// 把服务端错误落盘，避免进程意外退出后无从排查（M1 之前只打到终端）
+const SERVER_LOG = join(RUNTIME, "server.log");
+function logLine(line) {
+	try {
+		appendFileSync(SERVER_LOG, `[${new Date().toISOString()}] ${line}\n`);
+	} catch {
+		/* ignore logging failure */
+	}
+}
 
 function broadcast(event) {
 	const payload = JSON.stringify(event);
@@ -41,9 +54,13 @@ function broadcast(event) {
 }
 
 function writeSse(res, event, payload) {
-	if (res.writableEnded) return;
-	if (event.id) res.write(`id: ${event.id}\n`);
-	res.write(`data: ${payload}\n\n`);
+	if (res.writableEnded || res.destroyed) return;
+	try {
+		if (event.id) res.write(`id: ${event.id}\n`);
+		res.write(`data: ${payload}\n\n`);
+	} catch (error) {
+		logLine(`sse write failed: ${String(error?.message ?? error)}`);
+	}
 }
 
 const supervisor = new Supervisor({
@@ -56,11 +73,20 @@ const server = createServer(async (req, res) => {
 	try {
 		await route(req, res);
 	} catch (error) {
+		logLine(`request error ${req.method} ${req.url}: ${error?.stack ?? error}`);
 		console.error("[server]", error);
-		if (!res.headersSent) sendJson(res, 500, { error: String(error?.message ?? error) });
+		if (!res.headersSent) sendJson(res, 500, { error: friendlyError(error) });
 		else res.end();
 	}
 });
+
+function friendlyError(error) {
+	const message = String(error?.message ?? error);
+	if (message.includes("UNIQUE constraint")) {
+		return "数据 ID 冲突（服务重启后计数器未恢复导致）。请刷新页面重试；若持续出现请删除 .runtime/pi-pentest.db 后重启。";
+	}
+	return message;
+}
 
 /* ------------------------------- 路由 ------------------------------- */
 
@@ -86,6 +112,7 @@ async function routeApi(req, res, url) {
 			model,
 			configured: Boolean(model),
 			hasKey: Boolean(llmApiKeyEnv()),
+			limits: LIMITS,
 			time: Date.now(),
 		});
 	}
@@ -113,7 +140,11 @@ async function routeApi(req, res, url) {
 		if (!body.target) return sendJson(res, 400, { error: "target 必填" });
 		if (!activeModelEnv()) return sendJson(res, 409, { error: "请先在「模型设置」里配置模型" });
 		const name = body.name || `项目 ${new Date().toLocaleString("zh-CN")}`;
-		const { project, commander } = await supervisor.createProject({ name, target: body.target });
+		const { project, commander } = await supervisor.createProject({
+			name,
+			target: body.target,
+			kickoff: body.kickoff,
+		});
 		return sendJson(res, 200, { project, commander });
 	}
 
@@ -125,6 +156,14 @@ async function routeApi(req, res, url) {
 		if (!project) return sendJson(res, 404, { error: "项目不存在" });
 
 		if (!rest && method === "GET") return sendJson(res, 200, { project });
+
+		if (!rest && method === "DELETE") {
+			await supervisor.stopProject(projectId);
+			store.deleteProject(projectId);
+			// 项目删除后同步清掉 runtime 目录（会话 / 工具产物），避免残留
+			await rm(join(RUNTIME, "projects", projectId), { recursive: true, force: true }).catch(() => {});
+			return sendJson(res, 200, { ok: true, deleted: projectId });
+		}
 
 		if (rest === "agents" && method === "GET") {
 			return sendJson(res, 200, { agents: store.listAgents(projectId) });
@@ -192,6 +231,9 @@ async function routeApi(req, res, url) {
 		if (rest === "messages" && method === "POST") {
 			const body = await readJson(req);
 			if (!body.text?.trim()) return sendJson(res, 400, { error: "text 不能为空" });
+			if (agent.status === "queued") {
+				return sendJson(res, 409, { error: "agent 正在排队等待启动，请稍后再发" });
+			}
 			if (!supervisor.hasClient(agentId)) {
 				return sendJson(res, 409, {
 					error:
@@ -206,6 +248,11 @@ async function routeApi(req, res, url) {
 			if (!supervisor.hasClient(agentId)) return sendJson(res, 409, { error: "agent 进程已结束" });
 			await supervisor.abort(agentId);
 			return sendJson(res, 200, { ok: true });
+		}
+
+		if (rest === "resume" && method === "POST") {
+			const resumed = await supervisor.resumeAgent(agentId);
+			return sendJson(res, 200, { agent: resumed });
 		}
 	}
 
@@ -340,19 +387,33 @@ async function readJson(req) {
 
 /* ------------------------------- 启动 ------------------------------- */
 
+const model = activeModelEnv();
 console.log(`[pi-pentest] server http://${SERVER_HOST}:${SERVER_PORT}`);
-console.log(`[pi-pentest] model  ${JSON.stringify(activeModelEnv())}`);
+console.log(`[pi-pentest] model  ${JSON.stringify(model)}`);
 console.log(`[pi-pentest] db     ${DB_PATH}`);
-if (!activeModelEnv()) console.log("[pi-pentest] 未配置模型：请在 WebUI 的「模型设置」里填写 API 后再新建项目");
+logLine(`start server port=${SERVER_PORT} model=${JSON.stringify(model)}`);
+if (!model) console.log("[pi-pentest] 未配置模型：请在 WebUI 的「模型设置」里填写 API 后再新建项目");
 
-// 进程重启后旧 agent 子进程必然已结束：标记为 error，避免 UI 误以为还能对话
+// 异常统一落盘：以后进程意外退出能查 .runtime/server.log，而不是只看到一句 Failed to fetch
+process.on("uncaughtException", (error) => {
+	logLine(`uncaughtException: ${error?.stack ?? error}`);
+	console.error("[server] uncaughtException", error);
+	process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+	logLine(`unhandledRejection: ${reason?.stack ?? reason}`);
+	console.error("[server] unhandledRejection", reason);
+});
+
+// 进程重启后旧 agent 子进程必然已结束：标记 interrupted，保留 session_file 供恢复。
+// queued 也要处理：进程重启后队列已经不存在，否则会永远停在"排队中"。
 for (const project of store.listProjects()) {
 	for (const agent of store.listAgents(project.id)) {
-		if (agent.status === "running" || agent.status === "starting") {
+		if (agent.status === "running" || agent.status === "starting" || agent.status === "queued") {
 			store.saveAgent({
 				...agent,
-				status: "error",
-				error: "服务重启，agent 进程已结束（M2 将支持会话恢复）",
+				status: "interrupted",
+				error: "服务重启导致运行中断，可在会话头部点「恢复」继续原会话",
 			});
 		}
 	}
@@ -362,6 +423,7 @@ server.listen(SERVER_PORT, SERVER_HOST);
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
 	process.on(signal, async () => {
+		logLine(`received ${signal}, shutting down`);
 		await supervisor.shutdown();
 		server.close(() => process.exit(0));
 	});

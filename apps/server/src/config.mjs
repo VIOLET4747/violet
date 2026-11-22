@@ -15,7 +15,10 @@ import { homedir } from "node:os";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(HERE, "../../..");
-export const RUNTIME = join(ROOT, ".runtime");
+/** 可用 PENTEST_RUNTIME_DIR 指向隔离目录（验收脚本/多实例测试用）。 */
+export const RUNTIME = process.env.PENTEST_RUNTIME_DIR
+	? resolve(process.env.PENTEST_RUNTIME_DIR)
+	: join(ROOT, ".runtime");
 export const AGENT_DIR = join(RUNTIME, "agent-dir");
 export const SESSIONS_ROOT = join(RUNTIME, "projects");
 export const DB_PATH = join(RUNTIME, "pi-pentest.db");
@@ -39,6 +42,41 @@ export function projectSessionDir(projectId) {
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
+
+/** agent 的工作目录：工具产物放这里，不和会话 JSONL 混在一起。 */
+export function projectWorkspaceDir(projectId) {
+	const dir = join(SESSIONS_ROOT, projectId, "workspace");
+	mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+/* ------------------------------- 运行时参数 ------------------------------- */
+
+const positiveNumber = (value, fallback) => {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+export const LIMITS = {
+	/** 全局同时运行的 agent 上限（排队，不丢弃）。 */
+	maxConcurrentAgents: Math.floor(positiveNumber(process.env.PENTEST_MAX_CONCURRENCY, 4)),
+	/** 单个 agent 墙钟上限，到点中止并标记失败。 */
+	agentTimeoutMs: positiveNumber(process.env.PENTEST_AGENT_TIMEOUT_MS, 20 * 60 * 1000),
+	/** 多久没有收到任何 pi 事件就判定卡死。 */
+	heartbeatMs: positiveNumber(process.env.PENTEST_HEARTBEAT_MS, 5 * 60 * 1000),
+	/** 父 agent 空闲时，合并通知的防抖窗口。 */
+	wakeDebounceMs: positiveNumber(process.env.PENTEST_WAKE_DEBOUNCE_MS, 1500),
+	/** 父 agent 忙碌时，通知最多等待多久（到点用 follow_up 硬塞）。 */
+	wakeMaxWaitMs: positiveNumber(process.env.PENTEST_WAKE_MAX_WAIT_MS, 60 * 1000),
+	/** 单个项目最多派发多少个子 agent（防止真实模型无限扩展测试面）。 */
+	maxChildrenPerProject: Math.floor(positiveNumber(process.env.PENTEST_MAX_CHILDREN, 8)),
+	/** 每个 agent 的轮次预算（assistant 消息数）。 */
+	maxTurns: Math.floor(positiveNumber(process.env.PENTEST_MAX_TURNS, 40)),
+	/** 每个 agent 的 token 预算（累计 input+output，usage 缺失时用上下文 token 兜底）。 */
+	maxTokens: Math.floor(positiveNumber(process.env.PENTEST_MAX_TOKENS, 400_000)),
+	/** 预算软提醒阈值：到 80% 时提示 agent 收尾。 */
+	budgetSoftRatio: 0.8,
+};
 
 /* ---------------------------------- 配置 ---------------------------------- */
 

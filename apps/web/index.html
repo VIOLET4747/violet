@@ -4,6 +4,15 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<title>Pi-Pentest · 渗透测试 Agent 平台</title>
+		<script>
+			// 在样式加载前应用主题，避免刷新时先闪一下深色
+			try {
+				var t = localStorage.getItem("pi-pentest-theme");
+				document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+			} catch (e) {
+				document.documentElement.dataset.theme = "dark";
+			}
+		</script>
 	</head>
 	<body>
 		<div id="root"></div>
