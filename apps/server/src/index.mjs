@@ -166,7 +166,11 @@ async function routeApi(req, res, url) {
 		}
 
 		if (rest === "agents" && method === "GET") {
-			return sendJson(res, 200, { agents: store.listAgents(projectId) });
+			const agents = store.listAgents(projectId).map((agent) => ({
+				...agent,
+				connected: supervisor.hasClient(agent.id),
+			}));
+			return sendJson(res, 200, { agents });
 		}
 
 		if (rest === "agents" && method === "POST") {
@@ -218,7 +222,9 @@ async function routeApi(req, res, url) {
 		const agent = store.getAgent(agentId);
 		if (!agent) return sendJson(res, 404, { error: "agent 不存在" });
 
-		if (!rest && method === "GET") return sendJson(res, 200, { agent });
+		if (!rest && method === "GET") {
+			return sendJson(res, 200, { agent: { ...agent, connected: supervisor.hasClient(agentId) } });
+		}
 
 		if (rest === "messages" && method === "GET") {
 			const messages = store
@@ -237,7 +243,7 @@ async function routeApi(req, res, url) {
 			if (!supervisor.hasClient(agentId)) {
 				return sendJson(res, 409, {
 					error:
-						"该 agent 的进程已不在运行（服务重启后旧进程会结束）。M1 暂不支持恢复会话，请新建项目重跑；历史记录仍可回放。",
+						"该 agent 的进程已不在运行（服务重启后旧进程会结束）。可以点会话头部的「恢复会话」接回原会话，历史记录不会丢。",
 				});
 			}
 			const result = await supervisor.userMessage(agentId, body.text);
@@ -406,18 +412,29 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // 进程重启后旧 agent 子进程必然已结束：标记 interrupted，保留 session_file 供恢复。
+// 注意 idle 也要处理：idle 只是"等着下一条消息"，进程同样已经没了，否则 UI 会显示空闲但发不了消息。
 // queued 也要处理：进程重启后队列已经不存在，否则会永远停在"排队中"。
 for (const project of store.listProjects()) {
 	for (const agent of store.listAgents(project.id)) {
-		if (agent.status === "running" || agent.status === "starting" || agent.status === "queued") {
+		const stale = agent.status === "running" || agent.status === "starting" || agent.status === "queued";
+		const idleButDead = agent.status === "idle" && agent.sessionFile;
+		if (stale || idleButDead) {
 			store.saveAgent({
 				...agent,
 				status: "interrupted",
-				error: "服务重启导致运行中断，可在会话头部点「恢复」继续原会话",
+				error: "服务重启导致进程中断，可在会话头部点「恢复会话」继续原会话",
 			});
 		}
 	}
 }
+
+// 崩溃前"子 agent 已完成但父 agent 没收到通知"的，补投一次
+supervisor
+	.reconcileAfterBoot()
+	.then((count) => {
+		if (count > 0) logLine(`reconciled ${count} unreported agent(s) after boot`);
+	})
+	.catch((error) => logLine(`reconcileAfterBoot failed: ${error?.stack ?? error}`));
 
 server.listen(SERVER_PORT, SERVER_HOST);
 

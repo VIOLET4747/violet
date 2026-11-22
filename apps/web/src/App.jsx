@@ -149,7 +149,10 @@ function MainApp({ streamEnabled = true }) {
 			return;
 		}
 		if (type === "agent.updated") {
-			setAgents((prev) => prev.map((item) => (item.id === payload.agent.id ? payload.agent : item)));
+			// SSE 里没有 connected 字段（只有 REST 列表会算），合并时保留已有值
+			setAgents((prev) =>
+				prev.map((item) => (item.id === payload.agent.id ? { ...item, ...payload.agent } : item)),
+			);
 			return;
 		}
 		if (type === "message.start") {
@@ -190,11 +193,21 @@ function MainApp({ streamEnabled = true }) {
 			.catch(() => {});
 	}, [selectedId, loadedAgents]);
 
-	// 断线重连后补状态
+	// 断线重连后补状态：agents / facts / 当前会话消息（SSE 的 after 有 500 条上限，可能补不全）
 	useEffect(() => {
 		if (!streamEnabled || streamStatus !== "live" || !projectId) return;
 		api.get(`/api/projects/${projectId}/agents`).then((data) => setAgents(data.agents)).catch(() => {});
-	}, [streamStatus, projectId, streamEnabled]);
+		api.get(`/api/projects/${projectId}/facts`).then((data) => setFacts(data.facts)).catch(() => {});
+		if (selectedId) {
+			api
+				.get(`/api/agents/${selectedId}/messages`)
+				.then((data) => {
+					const normalized = data.messages.map((item) => normalizeMessage(item.id, item.message)).filter(Boolean);
+					setMessagesByAgent((prev) => ({ ...prev, [selectedId]: normalized }));
+				})
+				.catch(() => {});
+		}
+	}, [streamStatus, projectId, streamEnabled, selectedId]);
 
 	async function sendMessage(text) {
 		if (!selectedId) return;

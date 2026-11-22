@@ -125,18 +125,22 @@ SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact
 
 服务被硬杀后重新启动：
 
-- 中断时处于 `running / starting / queued` 的 agent 会被标记为 **`interrupted`**（历史消息、会话文件都保留）
-- 在会话头部点 **「恢复会话」**（`POST /api/agents/:id/resume`），平台会用 `switch_session` 把原来的 pi 会话文件接回来，状态回到 `idle`，可以继续对话
+- 中断时处于 `running / starting / queued / idle` 的 agent 都会被标记为 **`interrupted`**（历史消息、会话文件都保留）
+- 在会话头部点 **「恢复会话」**（`POST /api/agents/:id/resume`），平台会用 `switch_session` 把原来的 pi 会话文件接回来，状态回到 `idle`，可以继续对话；恢复按钮按「是否还有活进程」（`connected=false`）判断，不再依赖状态名
+- 崩溃前已经结束、但父 agent 还没来得及收到通知的子 agent，启动时会**补投**一次通知；恢复父 agent 后会立刻投递积压的通知
 - 不会自动续跑，避免重复执行未完成的动作
 
 ![重启恢复](docs/screens/m2-resume.png)
 
 ## 预算与 Handoff（M2）
 
-每个 agent 有轮次 / token 预算：
+每个 agent 有轮次 / token 预算（默认 40 轮 / 400k tokens）：
 
-- 到 80%：通过 `steer` 提醒 agent「立即收尾，输出结论、未完成事项、下一步建议」
+- 预算按**本次运行**计算：恢复会话后重新给一个窗口，不会第一条消息就再次失败
+- 到 80%：通过 `steer` 提醒 agent「立即收尾，输出结论、未完成事项、下一步建议」（只在还会继续调用工具时提醒，避免已经收尾后又多跑一轮）
 - 到 100%：中止并标记 `failed`，同时生成 **Handoff Note**（最后输出 + 已写入事实 + 未完成部分），随「系统通知」发给父 agent，由父 agent 决定是否重派
+- 模型输出被截断（`stopReason=length`）也按失败处理，不会把残缺结论当成功
+- 工具执行期间暂停心跳（nmap/sqlmap 这类长工具不会被误判卡死），由墙钟兜底；中止后 10s 不退出会强制结束进程
 
 ## 验收
 
@@ -146,13 +150,13 @@ SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact
 cd D:\Users\27973\Desktop\pi-pentest-acceptance
 
 node run.mjs --runs=3       # M1：主→子调度（连续 5 轮用 --runs=5）
-node run-m2.mjs             # M2：预算/Handoff + 硬杀重启/resume（隔离端口 8799）
+node --no-warnings run-m2.mjs   # M2：预算/Handoff + 硬杀重启/resume（隔离端口 8799）
 ```
 
 前置：靶场在跑、主平台（8787）已配置模型。M2 脚本会复制主实例的模型配置到隔离 runtime。
 
 M1 每轮断言：子 agent 出现 / 事实落库 / 父 agent 收到通知 / 有最终结论 / 通知体量受控 / 无失败 / cwd 干净。
-M2 断言：低预算触发 `failed + 预算耗尽`、8s 墙钟触发 `failed + 超时`、两者父 agent 都收到交接通知；硬杀重启后历史完整、出现 `interrupted`、resume 后回到 idle 并继续对话。
+M2 断言：低预算触发 `failed + 预算耗尽`、8s 墙钟触发 `failed + 超时`、两者父 agent 都收到交接通知；预算耗尽后 resume 能继续对话；硬杀重启后历史完整、`interrupted`（含指挥官）、resume 后回到 idle 并继续对话；崩溃后补投子 agent 通知。
 
 ## 已知限制
 

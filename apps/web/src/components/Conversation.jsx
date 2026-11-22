@@ -128,7 +128,7 @@ export function Conversation({ agent, messages, showThinking, setShowThinking, o
 							⧉
 						</button>
 					) : null}
-					{agent.status === "interrupted" && onResume ? (
+					{onResume && agent.connected === false && agent.sessionFile ? (
 						<button className="resume-btn" onClick={() => resume()} disabled={resuming}>
 							{resuming ? "恢复中…" : "恢复会话"}
 						</button>

@@ -178,15 +178,33 @@ export class Supervisor {
 	async resumeAgent(agentId) {
 		const agent = this.store.getAgent(agentId);
 		if (!agent) throw new Error(`agent 不存在: ${agentId}`);
-		if (this.hasClient(agentId)) throw new Error("agent 已在运行，无需恢复");
+		const existing = this.clients.get(agentId);
+		if (existing && !existing.finished) throw new Error("agent 已在运行，无需恢复");
 		if (!agent.sessionFile || !existsSync(agent.sessionFile)) {
 			throw new Error("没有找到可恢复的会话文件（可能已被清理）");
+		}
+		// 终态后旧 pi 进程可能还在退出：先停掉，避免两个进程写同一个会话文件
+		if (existing) {
+			existing.silent = true;
+			this.clearTimers(existing);
+			await existing.client?.abort().catch(() => {});
+			await existing.client?.stop().catch(() => {});
+			for (let i = 0; i < 50 && this.clients.get(agentId); i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+			if (this.clients.get(agentId)) this.clients.delete(agentId);
+			this.active.delete(agentId);
 		}
 		if (!this.hasCapacity()) throw new Error("并发已满，请稍后再试");
 		this.active.add(agentId);
 		this.setStatus(agentId, "starting");
 		try {
 			await this.spawn(agent, { resumeSession: agent.sessionFile });
+			// 恢复后清掉旧汇报标记：再次失败时仍然要通知父 agent
+			const current = this.store.getAgent(agentId);
+			if (current) this.store.saveAgent({ ...current, reportedAt: null });
+			// 崩溃期间积压的唤醒通知，在恢复后补投
+			this.flushNotices(agentId).catch(() => {});
 			return this.store.getAgent(agentId);
 		} catch (error) {
 			this.finishAgent(agentId, "failed", `恢复失败: ${String(error?.message ?? error)}`);
@@ -219,7 +237,15 @@ export class Supervisor {
 			silent: false,
 			timeoutTimer: null,
 			heartbeatTimer: null,
+			// 正在执行的工具：工具执行期间没有 pi 事件，心跳不能误判卡死
+			activeTools: new Set(),
+			// 预算基线：恢复时从这里重新计算，避免预算耗尽的 agent 恢复后立刻再次失败
+			budgetBaseTurns: 0,
+			budgetBaseTokens: 0,
 		};
+		const snapshot = this.store.getAgent(agent.id) ?? agent;
+		ctx.budgetBaseTurns = snapshot.turns ?? 0;
+		ctx.budgetBaseTokens = (snapshot.tokensIn ?? 0) + (snapshot.tokensOut ?? 0);
 
 		const client = PiRpcClient.start({
 			cli,
@@ -307,7 +333,7 @@ export class Supervisor {
 		const { agent } = ctx;
 		ctx.timeoutTimer = setTimeout(() => {
 			this.failWithHandoff(agent.id, `超过墙钟上限 ${Math.round(LIMITS.agentTimeoutMs / 60000)} 分钟`);
-			ctx.client?.abort().catch(() => {});
+			this.abortWithKill(ctx);
 		}, LIMITS.agentTimeoutMs);
 		this.resetHeartbeat(ctx);
 	}
@@ -316,12 +342,26 @@ export class Supervisor {
 		if (ctx.finished) return;
 		clearTimeout(ctx.heartbeatTimer);
 		ctx.heartbeatTimer = setTimeout(() => {
+			// 工具执行期间没有 pi 事件是正常的（nmap/sqlmap 可能跑很久），交给墙钟兜底
+			if (ctx.activeTools?.size > 0) {
+				this.resetHeartbeat(ctx);
+				return;
+			}
 			this.failWithHandoff(
 				ctx.agent.id,
 				`心跳超时：${Math.round(LIMITS.heartbeatMs / 60000)} 分钟没有收到 agent 事件`,
 			);
-			ctx.client?.abort().catch(() => {});
+			this.abortWithKill(ctx);
 		}, LIMITS.heartbeatMs);
+	}
+
+	/** 中止后如果 pi 进程不退出，宽限 10s 强制结束，避免僵尸进程占着会话和并发槽。 */
+	abortWithKill(ctx) {
+		ctx.client?.abort().catch(() => {});
+		const timer = setTimeout(() => {
+			if (this.clients.get(ctx.agent.id) === ctx) ctx.client?.stop().catch(() => {});
+		}, 10_000);
+		timer.unref?.();
 	}
 
 	clearTimers(ctx) {
@@ -441,6 +481,7 @@ export class Supervisor {
 				break;
 			}
 			case "tool_execution_start": {
+				ctx.activeTools?.add(event.toolCallId);
 				this.broadcast({
 					projectId: agent.projectId,
 					agentId: agent.id,
@@ -450,6 +491,7 @@ export class Supervisor {
 				break;
 			}
 			case "tool_execution_end": {
+				ctx.activeTools?.delete(event.toolCallId);
 				this.broadcast({
 					projectId: agent.projectId,
 					agentId: agent.id,
@@ -464,13 +506,22 @@ export class Supervisor {
 				break;
 			}
 			case "agent_settled": {
-				const failed = !event.aborted && ctx.lastStopReason === "error";
-				const status = event.aborted ? "aborted" : failed ? "failed" : "idle";
-				const saved = this.finishAgent(agent.id, status, failed ? ctx.lastErrorMessage || "模型调用失败" : undefined);
-				if (status === "idle") {
-					if (saved && !saved.tokensIn) this.applyContextUsage(agent.id).catch(() => {});
-					this.flushNotices(agent.id).catch(() => {});
+				if (event.aborted) {
+					this.finishAgent(agent.id, "aborted");
+					break;
 				}
+				if (ctx.lastStopReason === "error") {
+					this.finishAgent(agent.id, "failed", ctx.lastErrorMessage || "模型调用失败");
+					break;
+				}
+				// 输出被 token 上限截断：不能当成"已完成"交给父 agent
+				if (ctx.lastStopReason === "length") {
+					this.failWithHandoff(agent.id, "模型输出被截断（stopReason=length）");
+					break;
+				}
+				const saved = this.finishAgent(agent.id, "idle");
+				if (saved && !saved.tokensIn) this.applyContextUsage(agent.id).catch(() => {});
+				this.flushNotices(agent.id).catch(() => {});
 				break;
 			}
 			default:
@@ -492,26 +543,28 @@ export class Supervisor {
 		this.broadcast({ projectId: agent.projectId, agentId, type: "agent.updated", payload: { agent: saved } });
 	}
 
-	/** 轮次/token 预算：软提醒 → 硬中止 + Handoff Note。 */
+	/** 轮次/token 预算：软提醒 → 硬中止 + Handoff Note。预算按"本次运行"计，恢复后重新计算。 */
 	async checkBudget(ctx) {
 		if (ctx.finished) return;
 		const agent = this.store.getAgent(ctx.agent.id);
 		if (!agent) return;
 		const turns = agent.turns;
 		const tokens = agent.tokensIn + agent.tokensOut;
-		const turnPct = LIMITS.maxTurns > 0 ? turns / LIMITS.maxTurns : 0;
-		const tokenPct = LIMITS.maxTokens > 0 ? tokens / LIMITS.maxTokens : 0;
+		const usedTurns = Math.max(0, turns - (ctx.budgetBaseTurns ?? 0));
+		const usedTokens = Math.max(0, tokens - (ctx.budgetBaseTokens ?? 0));
+		const turnPct = LIMITS.maxTurns > 0 ? usedTurns / LIMITS.maxTurns : 0;
+		const tokenPct = LIMITS.maxTokens > 0 ? usedTokens / LIMITS.maxTokens : 0;
 		const pct = Math.max(turnPct, tokenPct);
 
 		if (pct >= 1) {
-			const reason = `预算耗尽（turns ${turns}/${LIMITS.maxTurns}，tokens ${tokens}/${LIMITS.maxTokens}）`;
+			const reason = `预算耗尽（本轮 turns ${usedTurns}/${LIMITS.maxTurns}，tokens ${usedTokens}/${LIMITS.maxTokens}；累计 ${turns} 轮）`;
 			this.failWithHandoff(agent.id, reason);
-			ctx.client?.abort().catch(() => {});
+			this.abortWithKill(ctx);
 			return;
 		}
-		if (pct >= LIMITS.budgetSoftRatio && !ctx.budgetWarned) {
+		if (pct >= LIMITS.budgetSoftRatio && !ctx.budgetWarned && ctx.lastStopReason === "toolUse") {
 			ctx.budgetWarned = true;
-			const reminder = `【预算提醒】已使用 turns ${turns}/${LIMITS.maxTurns}、tokens ${tokens}/${LIMITS.maxTokens}。请立即收尾：输出已确认结论、未完成事项、下一步建议，然后结束本轮。`;
+			const reminder = `【预算提醒】本轮已使用 turns ${usedTurns}/${LIMITS.maxTurns}、tokens ${usedTokens}/${LIMITS.maxTokens}。请立即收尾：输出已确认结论、未完成事项、下一步建议，然后结束本轮。`;
 			ctx.client?.send({ type: "steer", message: reminder }).catch(() => {});
 		}
 	}
@@ -650,7 +703,12 @@ export class Supervisor {
 			const ctx = this.clients.get(id);
 			if (ctx) ctx.silent = true;
 			this.queue = this.queue.filter((queued) => queued !== id);
-			ctx?.client?.abort().catch(() => {});
+			if (ctx) this.abortWithKill(ctx);
+			else {
+				// 排队中的 agent 没有进程，直接标记中止
+				const queuedAgent = this.store.getAgent(id);
+				if (queuedAgent) this.finishAgent(id, "aborted", "用户中止");
+			}
 			const agent = this.store.getAgent(id);
 			if (agent && !TERMINAL_STATUSES.has(agent.status)) {
 				this.finishAgent(id, "aborted", "用户中止");
@@ -675,6 +733,34 @@ export class Supervisor {
 		}
 		this.queue = this.queue.filter((id) => !agents.some((agent) => agent.id === id));
 		this.pump();
+	}
+
+	/**
+	 * 服务重启后补投"子 agent 已完成但父 agent 没收到通知"的情况：
+	 * 崩溃发生在 finishAgent 已落状态、reportToParent 还没执行完时，父 agent 会永远等不到唤醒。
+	 */
+	async reconcileAfterBoot() {
+		let count = 0;
+		for (const project of this.store.listProjects()) {
+			for (const agent of this.store.listAgents(project.id)) {
+				if (!agent.parentId || agent.reportedAt || agent.turns <= 0) continue;
+				// 卡在 interrupted 但 endedAt 已写入：说明崩溃前已经 settle 过（不是跑到一半），也要补投
+				const settledInterrupted = agent.status === "interrupted" && Boolean(agent.endedAt);
+				const terminal = ["idle", "failed", "error"].includes(agent.status);
+				if (!terminal && !settledInterrupted) continue;
+				const parent = this.store.getAgent(agent.parentId);
+				if (!parent) continue;
+				const outcome =
+					agent.status === "failed" || agent.status === "error" ? "failed" : "idle";
+				try {
+					await this.reportToParent(agent, outcome, agent.error);
+					count += 1;
+				} catch {
+					/* 单个失败不影响其它补投 */
+				}
+			}
+		}
+		return count;
 	}
 
 	/* ------------------------------ 子 agent 汇报 ------------------------------ */

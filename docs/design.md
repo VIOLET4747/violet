@@ -1358,17 +1358,23 @@ CLI: --mode rpc|json|print  --tools --exclude-tools --no-builtin-tools
 #### M2（4 天）：可靠性
 
 > **状态（收口）**：已实现。仓库外验收脚本 `pi-pentest-acceptance/run-m2.mjs`（隔离 runtime + 端口 8799），
-> 覆盖「低预算 → failed + Handoff → 父 agent 收到交接通知」「8s 墙钟超时 → failed + Handoff」「硬杀服务 → 重启 → interrupted → resume → 继续对话」，16/16 通过。
+> 覆盖「低预算 → failed + Handoff → 父 agent 收到交接通知 → resume 后获得新预算窗口」「8s 墙钟超时 → failed + Handoff」
+> 「硬杀服务 → 重启 → interrupted（含指挥官）→ resume → 继续对话」「崩溃后补投子 agent 通知」，22/22 通过。
 > 差异：重启恢复是**手动 resume**（点「恢复会话」），没有自动续跑；事件回放复用 SSE `after` + REST 消息，流式 delta 仍不落库。
 > 预算的 **UI 进度条**不在 M2，放到 M3（见下）。
 
 ```
 [x] 预算：每 agent maxTurns / maxTokens（墙钟已有），软提醒（80%）+ 硬中止 + Handoff Note
+    - 预算按"本次运行"计，resume 后重新计算；软提醒只在还会继续调用工具时发
+    - stopReason=length（输出被截断）按 failed + Handoff 处理
 [x] 超时：墙钟 + 无输出心跳（默认 5min 无事件判定卡死）；只有运行中才计时，空闲不误杀
-[x] 重启恢复：启动时把 running/starting/queued 标记为 interrupted；POST /api/agents/:id/resume 用 switch_session 恢复原会话
-[x] 事件回放：SSE `after=<id>` 补发已落库事件；刷新后走 REST 重新拉取消息（delta 不落库）
+    - 工具执行期间暂停心跳（长工具不误判），中止后 10s 未退出强制结束进程
+[x] 重启恢复：启动时把 running/starting/queued/idle 标记为 interrupted；resume 用 switch_session 恢复原会话
+    - resume 前清理残留的终态进程；resume 后清 reportedAt 并补投积压通知
+    - 启动时补投"子 agent 已结束但父 agent 没收到通知"（reconcileAfterBoot）
+[x] 事件回放：SSE `after=<id>` 补发已落库事件；刷新后走 REST 重新拉取消息；UI 重连补拉 agents/facts/当前会话消息
 [x] 失败语义：failed 不再被当成 completed；失败原因 + 交接说明进入唤醒消息
-[x] 验收：run-m2.mjs（预算 4 轮触发；kill -9 后重启、历史完整、interrupted、resume、继续对话）
+[x] 验收：run-m2.mjs（预算耗尽 + 恢复 + 墙钟超时 + 硬杀重启 + 指挥官恢复 + 通知补投）
 ```
 
 #### M3（5 天）：工具与上下文
