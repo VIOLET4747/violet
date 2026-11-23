@@ -19,6 +19,7 @@
 - **运行时约束**：并发上限 + 排队、墙钟超时、心跳兜底、中止父 Agent 级联中止整棵子树、失败状态会如实回传给父 Agent
 - **预算与 Handoff**：每 agent 轮次/token 预算，80% 软提醒、100% 中止并生成交接说明给父 Agent（M2）
 - **重启恢复**：服务硬杀重启后，中断的 Agent 标记为 `interrupted`，一键恢复原会话继续对话（M2）
+- **工具箱**：工具库页面，支持 网站 / 命令行 / 图形界面 / MCP 四种类型；命令行与 MCP 可被 AI 直接调用（`list_tools` / `run_tool`），图形界面和网站仅人工启动；输出完整落 artifact，模型只看截断文本
 - **模型自带**：不内置任何模型，首次启动填写自己的 API
 
 ## 环境要求
@@ -79,6 +80,10 @@ API key 存在 `.runtime/secrets.json`，不写进模型配置，也不会提交
 
 ![浅色模式主界面](docs/screens/m1-main-light.png)
 
+![浅色模式工具箱](docs/screens/toolbox-light.png)
+
+也支持用 `?theme=light` / `?theme=dark` 直接指定主题（方便分享和截图）。
+
 ## 架构
 
 ```
@@ -89,7 +94,7 @@ apps/server  ── supervisor ──> 每个 agent 一个 `pi --mode rpc` 子�
    │  调度 / 事件归一化 / 唤醒 / 用户对话        │
    │                                          └─ pi-kit 扩展：dispatch_agent / fact_* / brief 注入
    ▼
-SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact
+SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact / artifact
 ```
 
 | 目录 | 说明 |
@@ -98,7 +103,8 @@ SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact
 | `apps/web` | React + Vite 极简 WebUI |
 | `packages/agent-runtime` | pi RPC 客户端（spawn / JSONL / 事件 / 中止） |
 | `packages/db` | node:sqlite 领域库 |
-| `packages/pi-kit` | 唯一的 pi 扩展：业务工具 + 钩子 |
+| `packages/pi-kit` | 唯一的 pi 扩展：业务工具 + 钩子（dispatch / fact / run_tool / read_artifact） |
+| `tools/` | 内置工具 YAML 示例（bigout / http-probe / emit-json / nmap / httpx / nuclei） |
 | `roles/` | commander / recon / jwt 三个角色提示词 |
 | `scripts/dev.mjs` | 同时启动 server 与 Vite |
 | `docs/` | 截图与设计说明 |
@@ -142,6 +148,78 @@ SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact
 - 模型输出被截断（`stopReason=length`）也按失败处理，不会把残缺结论当成功
 - 工具执行期间暂停心跳（nmap/sqlmap 这类长工具不会被误判卡死），由墙钟兜底；中止后 10s 不退出会强制结束进程
 
+## 工具箱
+
+左下角 **工具箱** 是独立的工具库页面（左侧分类、搜索、卡片列表），支持直接启动：
+
+![工具箱](docs/screens/toolbox-light.png)
+
+四种类型：
+
+| 类型 | 说明 | AI 可调用 |
+|---|---|---|
+| `cmd` 命令行 | argv 执行，输出落 artifact | ✅ `run_tool` |
+| `mcp` | 连接 MCP Server（stdio / http / sse），其 tools 暴露给 agent | ✅ `run_tool` |
+| `gui` 图形界面 | 直接启动本地 GUI 程序 | ❌ 仅人工 |
+| `website` 网站 | 用默认浏览器打开 | ❌ 仅人工 |
+
+添加/编辑在 UI 里填：分类、名称、类型、可执行文件与参数（cmd/gui）、URL（website）、MCP 传输/命令/URL（mcp）、图标、版本、运行环境、主页、描述。
+分类可以独立管理：左侧「分类 · ＋ 新建」新增自定义分类（哪怕 0 个工具也会保留并显示，方便先建分类再填工具）；分类下有工具时不能删，内置分类不可删。
+
+![添加工具](docs/screens/toolbox-add.png)
+也可以用 YAML 写（`tools/` 示例只读，`.runtime/tools/` 用户自定义，同 id 覆盖）：
+
+```yaml
+id: http-probe
+name: HTTP 探测
+type: cmd
+category: 单点信息收集
+icon: "🌐"
+version: "1.0"
+executable: curl
+args: ["-s", "-i", "--max-time", "{timeout}", "{url}"]
+params:
+  - { name: url, type: string, required: true, description: 目标 URL }
+  - { name: timeout, type: number, default: 15 }
+timeoutSec: 60
+modelOutputChars: 6000
+parser: text
+```
+
+MCP 示例：
+
+```yaml
+id: filesystem
+name: 文件系统 MCP
+type: mcp
+category: AI工具
+mcp:
+  transport: stdio
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-filesystem", "D:\\workspace"]
+  env: { NODE_ENV: production }
+```
+
+直接启动：
+
+- `cmd`：后台运行，输出落 artifact，右下角面板轮询状态并显示结果
+- `website`：用默认浏览器打开（设置 `PENTEST_DRY_LAUNCH=1` 时只返回 URL，不真的打开，验收用）
+- `gui`：detached 启动进程，不管输出
+- `mcp`：连接后列出该 Server 的全部 tools，可手动填参数调用（AI 走同一套 manager）
+
+Agent 侧工具（recon / jwt 角色可用，只暴露 cmd + mcp）：
+
+- `list_tools`：列出可用工具（cmd 工具 + MCP Server 展开后的每个 tool，如 `mcp:echo-mcp/echo`）
+- `run_tool({tool, args})`：执行；MCP 工具用 `mcp:<server>/<tool>` 作为 tool id
+- `read_artifact({artifact_id, offset?, limit?})`：分段读取完整输出
+
+执行与上下文治理：
+
+- `argv` 直接 `spawn`，不经过 shell；超时会 kill 整个进程树
+- 完整输出落 `.runtime/projects/<id>/artifacts/*.log`，DB 记 `artifact`（bytes / sha256 / path）
+- 模型只看到 `modelOutputChars` 截断文本（头 70% + 尾 30%）+ artifact id；2MB 输出实测子会话仅 18k 字符
+- `runner: docker` 会以 `docker run --rm -v <workspace>:/work ...` 执行；需要本机 Docker daemon 和镜像（本机未验证）
+
 ## 验收
 
 验收脚本放在**仓库外**（避免污染项目目录），使用独立 runtime 和端口，不影响日常实例：
@@ -149,29 +227,38 @@ SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact
 ```powershell
 cd D:\Users\27973\Desktop\pi-pentest-acceptance
 
-node run.mjs --runs=3       # M1：主→子调度（连续 5 轮用 --runs=5）
-node --no-warnings run-m2.mjs   # M2：预算/Handoff + 硬杀重启/resume（隔离端口 8799）
+node run.mjs --runs=3              # M1：主→子调度（连续 5 轮用 --runs=5）
+node --no-warnings run-m2.mjs      # M2：预算/Handoff + 硬杀重启/resume（隔离端口 8799）
+node --no-warnings run-m3.mjs      # M3：工具注册表/执行器/artifact + agent 调工具（隔离端口 8798）
+node --no-warnings run-toolbox.mjs # 工具箱：四种类型/直接启动/MCP/AI 用 MCP+命令行（隔离端口 8797）
 ```
 
-前置：靶场在跑、主平台（8787）已配置模型。M2 脚本会复制主实例的模型配置到隔离 runtime。
+前置：靶场在跑、主平台（8787）已配置模型。M2/M3 脚本会复制主实例的模型配置到隔离 runtime。
 
 M1 每轮断言：子 agent 出现 / 事实落库 / 父 agent 收到通知 / 有最终结论 / 通知体量受控 / 无失败 / cwd 干净。
 M2 断言：低预算触发 `failed + 预算耗尽`、8s 墙钟触发 `failed + 超时`、两者父 agent 都收到交接通知；预算耗尽后 resume 能继续对话；硬杀重启后历史完整、`interrupted`（含指挥官）、resume 后回到 idle 并继续对话；崩溃后补投子 agent 通知。
+M3 断言：YAML 工具增删改 + 下一轮可用、3MB 输出落 artifact 且模型文本有界、artifact raw 可读、JSON parser、超时 kill、子 agent 通过 `run_tool` 调工具且上下文不被撑爆。
+工具箱断言：四种类型 CRUD、分类计数、cmd 后台启动 + artifact、website/gui 干跑、MCP 连接/列 tools/调用、子 agent 通过 `run_tool` 调用 MCP 与命令行工具并写事实。
 
 ## 已知限制
 
-- Agent 的 shell 工具直接跑在本机，没有审批弹窗与 scope 拦截（M3）
-- 没有工具容器化、证据链、报告导出（M3/M4）
+- Agent 的 shell 工具直接跑在本机，没有审批弹窗与 scope 拦截（M4/M5）
+- `runner: docker` 已实现，但本机 Docker daemon 未运行，**未做端到端验证**；nmap/httpx/nuclei 示例指向 `pi-pentest-toolbox:latest`，需要自行准备镜像或改成 `runner: host`
+- MCP 支持 stdio / http / sse 三种传输，本机只验证了 **stdio**；MCP Server 与命令行工具一样在本机执行，没有沙箱隔离
+- 网站 / 图形界面工具只供人工启动，不会暴露给 AI
+- GUI 启动后不托管日志/状态（只记录 pid）
+- 工具执行没有并发配额（全局 agent 并发限制仍然生效）
+- 没有证据链、报告导出（M4）
 - 事件回放只覆盖已落库的消息，流式 delta 不落库（刷新后看不到"正在生成"的中间态）
 - 重启恢复是手动触发，不会自动续跑中断的任务
 - 角色只有 commander / recon / jwt 三个
-- 项目目前只有**单目标字段**：填多个地址只能靠模型自行理解，系统级多目标建模安排在 M3（方案 B；最小方案 A 暂缓）
+- 项目目前只有**单目标字段**：填多个地址只能靠模型自行理解，系统级多目标建模尚未做
 
 ## 后续计划
 
-- M3：工具容器化、工具注册表、MCP 管理、**agent 预算进度条**（turns/tokens 使用率，80% 变色、耗尽显示 Handoff 原因）、**多目标建模（方案 B）**
-- M4：证据链与可复现报告
-- M5+：审批/scope 拦截、GUI 工具管理
+- M4：证据链与可复现报告（http_send + finding 闸门 + verifier）
+- M5：审批/scope 拦截、多目标建模、MCP 市场/模板
+- M6：更多角色 / skills 体系
 
 ## 常见问题
 

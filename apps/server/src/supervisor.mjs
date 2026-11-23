@@ -31,8 +31,8 @@ import { renderBrief } from "./brief.mjs";
 
 const ROLE_TOOLS = {
 	commander: ["dispatch_agent", "fact_write", "fact_query", "get_brief"],
-	recon: ["powershell", "fact_write", "fact_query", "get_brief"],
-	jwt: ["powershell", "fact_write", "fact_query", "get_brief"],
+	recon: ["powershell", "run_tool", "list_tools", "read_artifact", "fact_write", "fact_query", "get_brief"],
+	jwt: ["powershell", "run_tool", "list_tools", "read_artifact", "fact_write", "fact_query", "get_brief"],
 };
 const ROLE_LABELS = { commander: "指挥官", recon: "侦察员", jwt: "JWT 专家" };
 const ROLE_OBJECTIVES = {

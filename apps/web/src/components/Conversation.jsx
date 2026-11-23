@@ -21,6 +21,25 @@ function formatElapsed(ms) {
 	return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
 
+function formatTokens(n) {
+	if (!n) return "0";
+	return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function budgetInfo(agent, limits) {
+	if (!agent || !limits) return null;
+	const turns = agent.turns ?? 0;
+	const tokens = (agent.tokensIn ?? 0) + (agent.tokensOut ?? 0);
+	const turnPct = limits.maxTurns ? turns / limits.maxTurns : 0;
+	const tokenPct = limits.maxTokens ? tokens / limits.maxTokens : 0;
+	const pct = Math.max(turnPct, tokenPct);
+	return {
+		pct,
+		text: `${turns}/${limits.maxTurns} 轮 · ${formatTokens(tokens)}/${formatTokens(limits.maxTokens)}`,
+		level: pct >= 1 ? "over" : pct >= 0.8 ? "warn" : "",
+	};
+}
+
 function useElapsed(agent) {
 	const [, tick] = useState(0);
 	const running = agent?.status === "running";
@@ -35,7 +54,7 @@ function useElapsed(agent) {
 	return formatElapsed(end - agent.startedAt);
 }
 
-export function Conversation({ agent, messages, showThinking, setShowThinking, onSend, onAbort, onPopout, onResume }) {
+export function Conversation({ agent, messages, showThinking, setShowThinking, onSend, onAbort, onPopout, onResume, limits }) {
 	const [text, setText] = useState("");
 	const [sending, setSending] = useState(false);
 	const [resuming, setResuming] = useState(false);
@@ -53,6 +72,7 @@ export function Conversation({ agent, messages, showThinking, setShowThinking, o
 
 	const streaming = agent?.status === "running";
 	const elapsed = useElapsed(agent);
+	const budget = budgetInfo(agent, limits);
 
 	useEffect(() => {
 		setText("");
@@ -110,6 +130,11 @@ export function Conversation({ agent, messages, showThinking, setShowThinking, o
 					<span>{ROLE_LABELS[agent.role] ?? agent.role}</span>
 					<span className="chat-id">{agent.id}</span>
 					{elapsed ? <span className="chat-elapsed">{elapsed}</span> : null}
+					{budget && (agent.turns > 0 || streaming) ? (
+						<span className={`chat-budget ${budget.level}`} title={`预算 ${budget.text}`}>
+							{budget.text}
+						</span>
+					) : null}
 					{agent.status !== "idle" ? (
 						<span className={`chat-state ${agent.status}`}>{STATUS_LABELS[agent.status] ?? agent.status}</span>
 					) : null}

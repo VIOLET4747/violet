@@ -1379,23 +1379,25 @@ CLI: --mode rpc|json|print  --tools --exclude-tools --no-builtin-tools
 
 #### M3（5 天）：工具与上下文
 
+> **状态（2026-11-23 收口 v2）**：工具箱升级为独立工具库页面，支持 `website / gui / cmd / mcp` 四种类型；
+> cmd + mcp 供 AI 通过 `list_tools` / `run_tool` 调用，website/gui 仅人工启动。MCP 支持 stdio / http / sse（本机只验证 stdio）。
+> 仓库外验收 `pi-pentest-acceptance/run-toolbox.mjs`：21/21（CRUD、直接启动、MCP 连接/调用、agent 用 MCP+命令行）。
+>
+> 工具链部分完成，原 M3 验收脚本 `run-m3.mjs`：21/21（隔离 runtime + 端口 8798）。
+> 差异：容器执行用 `docker run --rm -v <workspace>:/work` 包装，**没有**覆盖 bash 的 `BashOperations`/`docker exec`；
+> 本机 Docker daemon 未运行，docker runner 未做端到端验证（验收自动跳过）。
+> 未完成：多目标建模（方案 B）、resume 后预算「累计继承」标注。
+
 ```
-[ ] Tool Registry（YAML）：argv 模板 + zod 参数 + timeout + 输出解析器
-[ ] 执行器：spawn 无 shell、超时、进程组 kill、输出写 artifact
-[ ] 三个真实工具：nmap / httpx / nuclei（先宿主执行，M3 末切容器）
-[ ] 输出截断：>8KB 落盘，模型只看到尾部 + artifact 句柄；read_artifact 工具
-[ ] 容器执行：覆盖 bash 的 BashOperations → docker exec（参考 examples/extensions/ssh.ts）
-[ ] 预算进度条：agent 列表 / 会话头展示 turns 与 tokens 使用率
-    - 数据源：SSE `agent.updated` 已带 turns/tokensIn/tokensOut；上限取 `/api/health.limits`
-    - 80% 变黄（软提醒已发）、100% 变红并显示 Handoff 原因；失败/中断状态也要能看
-    - resume 后标注「累计继承」，避免误以为恢复后预算重置
-    - 不需要新后端接口：使用量来自 `agent.updated` 的 turns/tokensIn/tokensOut，上限来自 `/api/health.limits`；只有"按角色给不同预算"时才需要在 agent 视图里补 budget 字段
-[ ] 多目标建模（方案 B，2026-11-22 决策）
-    - target 实体：id / 类型(domain/url/ip/cidr) / 状态(pending/running/done) / 优先级 / scope
-    - fact / finding / coverage 增加 targetId；简报按目标列出清单与状态
-    - 报告按目标分章；调度器按目标轮转或并发；审批/scope 校验按 target 执行
-    - 方案 A（项目 targets 数组 + UI 多行输入）**暂缓，不实现**；当前项目仍是单 target 字段，多目标只靠模型自行理解
-[ ] 验收补充：agent 跑到 80% 时 UI 进度条变黄；预算耗尽后显示 failed + 交接原因
+[x] Tool Registry（YAML）：argv 模板 + 参数校验 + timeout + 输出解析器（text/json）；仓库示例 + .runtime 覆盖
+[x] 执行器：spawn 无 shell、超时 kill 进程树、输出写 artifact（DB artifact 表 + 文件 + sha256）
+[x] 内置示例工具：bigout / http-probe / emit-json / nmap / httpx / nuclei
+    - nmap/httpx/nuclei 用 docker runner，需自备 pi-pentest-toolbox 镜像；本机未验证
+[x] 输出截断：完整输出落 artifact，模型只看到 head+tail 截断 + artifact 句柄；read_artifact 分段读取
+[x] 预算进度条：会话头展示 turns / tokens 使用率，80% 变黄、100% 变红（数据来自 agent.updated + /api/health.limits）
+[~] 容器执行：docker run 包装已实现；未覆盖 bash/docker exec，未端到端验证
+[ ] 多目标建模（方案 B）——未做；当前项目仍是单 target 字段
+[~] 验收补充：M3 脚本覆盖工具链；UI 进度条变黄/Handoff 原因展示未做自动化截图断言
 ```
 > 到 M3 结束，这套东西已经能对**授权靶场**做真实侦察了。
 

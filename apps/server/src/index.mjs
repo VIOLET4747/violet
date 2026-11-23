@@ -26,6 +26,8 @@ import {
 } from "./config.mjs";
 import { openStore } from "../../../packages/db/src/index.mjs";
 import { Supervisor, seedIdCounter } from "./supervisor.mjs";
+import { McpManager } from "./mcp.mjs";
+import { ToolRegistry } from "./tools.mjs";
 import { DB_PATH, RUNTIME } from "./config.mjs";
 
 ensureRuntimeDirs();
@@ -68,6 +70,9 @@ const supervisor = new Supervisor({
 	broadcast,
 	serverUrl: `http://${SERVER_HOST}:${SERVER_PORT}`,
 });
+
+const mcpManager = new McpManager();
+const toolRegistry = new ToolRegistry({ store, broadcast, mcp: mcpManager });
 
 const server = createServer(async (req, res) => {
 	try {
@@ -131,6 +136,135 @@ async function routeApi(req, res, url) {
 		return sendJson(res, 400, { error: "无法识别的配置请求" });
 	}
 
+	// ---------------------------- 工具注册表 ----------------------------
+	if (path === "/api/tool-categories" && method === "GET") {
+		return sendJson(res, 200, { categories: toolRegistry.categories() });
+	}
+	if (path === "/api/tool-categories" && method === "POST") {
+		const body = await readJson(req);
+		try {
+			return sendJson(res, 200, { categories: toolRegistry.addCategory(body.name) });
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+	const categoryMatch = /^\/api\/tool-categories\/(.+)$/.exec(path);
+	if (categoryMatch && method === "DELETE") {
+		try {
+			return sendJson(res, 200, { categories: toolRegistry.removeCategory(decodeURIComponent(categoryMatch[1])) });
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+
+	if (path === "/api/tools" && method === "GET") {
+		return sendJson(res, 200, { tools: toolRegistry.list(), categories: toolRegistry.categories() });
+	}
+
+	if (path === "/api/tools" && method === "POST") {
+		const body = await readJson(req);
+		try {
+			const tool = toolRegistry.save(body.tool ?? body);
+			return sendJson(res, 200, { tool });
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+
+	const toolMatch = /^\/api\/tools\/([a-z0-9-]+)(?:\/(launch|run|mcp|mcp\/call))?$/.exec(path);
+	const runMatch = /^\/api\/tool-runs\/([^/]+)$/.exec(path);
+	if (runMatch && method === "GET") {
+		const run = toolRegistry.getLaunch(runMatch[1]);
+		return run ? sendJson(res, 200, { run }) : sendJson(res, 404, { error: "运行记录不存在" });
+	}
+	if (toolMatch) {
+		const toolId = toolMatch[1];
+		const action = toolMatch[2];
+		if (action === "launch" && method === "POST") {
+			const body = await readJson(req).catch(() => ({}));
+			try {
+				const result = await toolRegistry.launch({ toolId, args: body.args ?? {} });
+				return sendJson(res, 200, result);
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (action === "mcp" && method === "GET") {
+			const tool = toolRegistry.get(toolId);
+			if (!tool || tool.type !== "mcp") return sendJson(res, 404, { error: "MCP 工具不存在" });
+			const listed = await toolRegistry.mcp.listTools(tool);
+			return sendJson(res, 200, listed);
+		}
+		if (action === "mcp/call" && method === "POST") {
+			const body = await readJson(req);
+			const tool = toolRegistry.get(toolId);
+			if (!tool || tool.type !== "mcp") return sendJson(res, 404, { error: "MCP 工具不存在" });
+			try {
+				const result = await toolRegistry.run({
+					toolId: `mcp:${toolId}/${body.tool}`,
+					projectId: body.projectId ?? "toolbox",
+					agentId: "ui",
+					args: body.args ?? {},
+				});
+				return sendJson(res, 200, { result });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (action === "run" && method === "POST") {
+			const body = await readJson(req);
+			try {
+				const result = await toolRegistry.run({
+					toolId,
+					projectId: body.projectId,
+					agentId: body.agentId,
+					args: body.args ?? {},
+				});
+				return sendJson(res, 200, { result });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (method === "PUT") {
+			const body = await readJson(req);
+			try {
+				const tool = toolRegistry.save(body.yaml ?? body.tool ?? body);
+				return sendJson(res, 200, { tool });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (method === "DELETE") {
+			const removed = toolRegistry.remove(toolId);
+			return sendJson(res, removed ? 200 : 404, { ok: removed });
+		}
+		if (method === "GET") {
+			const tool = toolRegistry.get(toolId);
+			return tool ? sendJson(res, 200, { tool: toolRegistry.list().find((item) => item.id === toolId) ?? tool }) : sendJson(res, 404, { error: "工具不存在" });
+		}
+	}
+
+	// ---------------------------- Artifact ----------------------------
+	const artifactMatch = /^\/api\/artifacts\/([^/]+)(?:\/(raw))?$/.exec(path);
+	if (artifactMatch) {
+		const artifactId = artifactMatch[1];
+		const raw = artifactMatch[2] === "raw";
+		const artifact = store.getArtifact(artifactId);
+		if (!artifact) return sendJson(res, 404, { error: "artifact 不存在" });
+		if (!raw) return sendJson(res, 200, { artifact });
+		try {
+			const offset = Number(url.searchParams.get("offset") ?? 0) || 0;
+			const limit = Number(url.searchParams.get("limit") ?? 200000) || 200000;
+			const part = toolRegistry.readArtifact(artifactId, { offset, limit });
+			res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+			res.end(part.text);
+			return;
+		} catch (error) {
+			return sendJson(res, 404, { error: String(error?.message ?? error) });
+		}
+	}
+
+	// ---------------------------- 项目 ----------------------------
 	if (path === "/api/projects" && method === "GET") {
 		return sendJson(res, 200, { projects: store.listProjects() });
 	}
@@ -191,6 +325,10 @@ async function routeApi(req, res, url) {
 
 		if (rest === "facts" && method === "GET") {
 			return sendJson(res, 200, { facts: store.listFacts(projectId) });
+		}
+
+		if (rest === "artifacts" && method === "GET") {
+			return sendJson(res, 200, { artifacts: store.listArtifacts(projectId) });
 		}
 
 		if (rest === "events" && method === "GET") {
@@ -329,6 +467,40 @@ async function routeInternal(req, res, url) {
 		return sendJson(res, 200, { brief: supervisor.buildBrief(agentId) });
 	}
 
+	if (path === "/internal/tools" && method === "GET") {
+		return sendJson(res, 200, { tools: await toolRegistry.listForAgent() });
+	}
+
+	if (path === "/internal/tools/run" && method === "POST") {
+		const body = await readJson(req);
+		if (!body.projectId || !body.toolId) return sendJson(res, 400, { error: "projectId / toolId 必填" });
+		try {
+			const result = await toolRegistry.run({
+				toolId: body.toolId,
+				projectId: body.projectId,
+				agentId: body.agentId,
+				args: body.args ?? {},
+			});
+			return sendJson(res, 200, result);
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+
+	if (path === "/internal/artifacts/read" && method === "POST") {
+		const body = await readJson(req);
+		if (!body.artifactId) return sendJson(res, 400, { error: "artifactId 必填" });
+		try {
+			return sendJson(
+				res,
+				200,
+				toolRegistry.readArtifact(body.artifactId, { offset: body.offset ?? 0, limit: body.limit ?? 20000 }),
+			);
+		} catch (error) {
+			return sendJson(res, 404, { error: String(error?.message ?? error) });
+		}
+	}
+
 	return sendJson(res, 404, { error: `未知内部接口: ${path}` });
 }
 
@@ -441,6 +613,7 @@ server.listen(SERVER_PORT, SERVER_HOST);
 for (const signal of ["SIGINT", "SIGTERM"]) {
 	process.on(signal, async () => {
 		logLine(`received ${signal}, shutting down`);
+		await mcpManager.closeAll().catch(() => {});
 		await supervisor.shutdown();
 		server.close(() => process.exit(0));
 	});

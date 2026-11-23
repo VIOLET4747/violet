@@ -5,6 +5,7 @@ import { AgentList } from "./components/AgentTree.jsx";
 import { Conversation } from "./components/Conversation.jsx";
 import { NewProjectDialog, FactsDialog } from "./components/Dialogs.jsx";
 import { SettingsPage } from "./components/SettingsPage.jsx";
+import { ToolsPage } from "./components/ToolsPage.jsx";
 import { ModelSetup } from "./components/ModelSetup.jsx";
 
 function useProjectStream(projectId, onEvent, enabled = true) {
@@ -59,10 +60,10 @@ export default function App() {
 		document.body.classList.add("standalone");
 		return <StandaloneAgent agentId={agent} projectId={project} streamEnabled={params.get("static") !== "1"} />;
 	}
-	return <MainApp streamEnabled={params.get("static") !== "1"} />;
+	return <MainApp streamEnabled={params.get("static") !== "1"} initialTools={params.get("tools") === "1"} />;
 }
 
-function MainApp({ streamEnabled = true }) {
+function MainApp({ streamEnabled = true, initialTools = false }) {
 	const [config, setConfig] = useState(null);
 	const [projects, setProjects] = useState([]);
 	const [projectId, setProjectId] = useState(null);
@@ -75,8 +76,10 @@ function MainApp({ streamEnabled = true }) {
 	const [showSettings, setShowSettings] = useState(false);
 	const [showNewProject, setShowNewProject] = useState(false);
 	const [showFacts, setShowFacts] = useState(false);
+	const [showTools, setShowTools] = useState(initialTools);
 	const [error, setError] = useState("");
 	const [backendOnline, setBackendOnline] = useState(true);
+	const [limits, setLimits] = useState(null);
 	const wasOffline = useRef(false);
 
 	const selectedAgent = agents.find((item) => item.id === selectedId) ?? null;
@@ -101,8 +104,9 @@ function MainApp({ streamEnabled = true }) {
 		let stopped = false;
 		const check = async () => {
 			try {
-				await api.get("/api/health");
+				const health = await api.get("/api/health");
 				if (stopped) return;
+				if (health.limits) setLimits(health.limits);
 				setBackendOnline(true);
 				if (wasOffline.current) {
 					wasOffline.current = false;
@@ -283,6 +287,10 @@ function MainApp({ streamEnabled = true }) {
 						<span>事实库</span>
 						<span className="fact-count">{facts.length}</span>
 					</button>
+					<button className="foot-btn" onClick={() => setShowTools(true)}>
+						<span>工具箱</span>
+						<span className="fact-count">YAML</span>
+					</button>
 					<button className="foot-btn" onClick={() => setShowSettings(true)}>
 						<span className={`dot ${streamEnabled ? streamStatus : "live"}`} />
 						<span className="model-name">
@@ -316,6 +324,7 @@ function MainApp({ streamEnabled = true }) {
 						onAbort={(id) => api.post(`/api/agents/${id}/abort`, {})}
 						onPopout={popout}
 						onResume={resumeAgent}
+						limits={limits}
 					/>
 				)}
 			</main>
@@ -324,6 +333,7 @@ function MainApp({ streamEnabled = true }) {
 				<SettingsPage config={config} onClose={() => setShowSettings(false)} onSaved={setConfig} />
 			) : null}
 			{showFacts ? <FactsDialog facts={facts} onClose={() => setShowFacts(false)} /> : null}
+			{showTools ? <ToolsPage onClose={() => setShowTools(false)} /> : null}
 			{showNewProject ? (
 				<NewProjectDialog
 					configured={config.configured}

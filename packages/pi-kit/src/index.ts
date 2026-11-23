@@ -250,6 +250,99 @@ export default function piKit(pi: ExtensionAPI): void {
 
 	pi.registerTool(
 		defineTool({
+			name: "run_tool",
+			description:
+				"执行工具箱里的本地工具（扫描器/探测/编码等）。优先用它而不是自己拼命令。输出过大时会落 artifact，只返回截断文本和 artifact id；需要全文用 read_artifact。",
+			parameters: Type.Object({
+				tool: Type.String({ description: "工具 id（用 list_tools 查看）" }),
+				args: Type.Optional(
+					Type.Record(Type.String(), Type.Unknown(), { description: "工具参数对象" }),
+				),
+			}),
+			async execute(_toolCallId, params) {
+				const result = await api<{
+					text: string;
+					artifactId: string;
+					exitCode: number;
+					truncated: boolean;
+				}>("/internal/tools/run", {
+					method: "POST",
+					body: JSON.stringify({
+						projectId: PROJECT_ID,
+						agentId: AGENT_ID,
+						toolId: params.tool,
+						args: params.args ?? {},
+					}),
+				});
+				log("tool_ran", { tool: params.tool, artifactId: result.artifactId });
+				return {
+					content: [{ type: "text", text: result.text }],
+					details: {
+						artifactId: result.artifactId,
+						exitCode: result.exitCode,
+						truncated: result.truncated,
+					},
+				};
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
+			name: "list_tools",
+			description: "列出当前工具箱里所有可用工具（id、说明、参数）。",
+			parameters: Type.Object({}),
+			async execute() {
+				const data = await api<{ tools: Array<{ id: string; name: string; description: string; params: unknown[] }> }>(
+					"/internal/tools",
+				);
+				const lines = data.tools.map(
+					(tool) =>
+						`- ${tool.id}（${tool.name}）：${tool.description}${tool.params?.length ? ` · 参数：${JSON.stringify(tool.params)}` : ""}`,
+				);
+				return {
+					content: [{ type: "text", text: lines.join("\n") || "（工具箱为空）" }],
+					details: { count: data.tools.length },
+				};
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
+			name: "read_artifact",
+			description: "读取 artifact（工具完整输出）的片段。先用 run_tool 返回的 artifact id。",
+			parameters: Type.Object({
+				artifact_id: Type.String({ description: "artifact id，如 art-0001" }),
+				offset: Type.Optional(Type.Number({ description: "字符偏移，默认 0" })),
+				limit: Type.Optional(Type.Number({ description: "最多读取字符数，默认 20000" })),
+			}),
+			async execute(_toolCallId, params) {
+				const data = await api<{
+					text: string;
+					totalBytes: number;
+					offset: number;
+					limit: number;
+					hasMore: boolean;
+				}>("/internal/artifacts/read", {
+					method: "POST",
+					body: JSON.stringify({
+						artifactId: params.artifact_id,
+						offset: params.offset ?? 0,
+						limit: params.limit ?? 20000,
+					}),
+				});
+				const meta = `[artifact ${params.artifact_id} · offset=${data.offset} · 本段 ${data.limit} / 总 ${data.totalBytes} 字节${data.hasMore ? " · 还有更多" : ""}]`;
+				return {
+					content: [{ type: "text", text: `${meta}\n${data.text}` }],
+					details: { totalBytes: data.totalBytes, hasMore: data.hasMore },
+				};
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
 			name: "get_brief",
 			label: "刷新项目简报",
 			description: "重新获取项目简报（目标、范围、已知事实、同级 agent 状态）。",

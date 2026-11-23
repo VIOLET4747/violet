@@ -67,6 +67,20 @@ CREATE TABLE IF NOT EXISTS fact (
 	created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fact_project ON fact(project_id, seq);
+
+CREATE TABLE IF NOT EXISTS artifact (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	agent_id TEXT,
+	kind TEXT NOT NULL DEFAULT 'tool-output',
+	title TEXT,
+	path TEXT NOT NULL,
+	bytes INTEGER NOT NULL DEFAULT 0,
+	sha256 TEXT,
+	meta TEXT NOT NULL DEFAULT '{}',
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_project ON artifact(project_id, created_at);
 `;
 
 const now = () => Date.now();
@@ -119,6 +133,15 @@ export function openStore(path) {
 		deleteProjectFacts: db.prepare("DELETE FROM fact WHERE project_id = ?"),
 		deleteProjectEvents: db.prepare("DELETE FROM agent_event WHERE project_id = ?"),
 		deleteProjectAgents: db.prepare("DELETE FROM agent_run WHERE project_id = ?"),
+		deleteProjectArtifacts: db.prepare("DELETE FROM artifact WHERE project_id = ?"),
+
+		insertArtifact: db.prepare(
+			`INSERT INTO artifact (id, project_id, agent_id, kind, title, path, bytes, sha256, meta, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		),
+		getArtifact: db.prepare("SELECT * FROM artifact WHERE id = ?"),
+		listArtifacts: db.prepare("SELECT * FROM artifact WHERE project_id = ? ORDER BY created_at ASC"),
+		maxArtifactSeq: db.prepare("SELECT COUNT(*) AS count FROM artifact"),
 	};
 
 	return {
@@ -140,6 +163,7 @@ export function openStore(path) {
 			stmts.deleteProjectFacts.run(id);
 			stmts.deleteProjectEvents.run(id);
 			stmts.deleteProjectAgents.run(id);
+			stmts.deleteProjectArtifacts.run(id);
 			stmts.deleteProject.run(id);
 		},
 
@@ -251,6 +275,41 @@ export function openStore(path) {
 		factsByAgent(projectId, agentId) {
 			return stmts.factsByAgent.all(projectId, agentId).map(parseFact);
 		},
+
+		addArtifact(artifact) {
+			const count = stmts.maxArtifactSeq.get()?.count ?? 0;
+			const id = artifact.id ?? `art-${String(count + 1).padStart(4, "0")}`;
+			stmts.insertArtifact.run(
+				id,
+				artifact.projectId,
+				artifact.agentId ?? null,
+				artifact.kind ?? "tool-output",
+				artifact.title ?? null,
+				artifact.path,
+				artifact.bytes ?? 0,
+				artifact.sha256 ?? null,
+				JSON.stringify(artifact.meta ?? {}),
+				now(),
+			);
+			return this.getArtifact(id);
+		},
+		getArtifact(id) {
+			const row = stmts.getArtifact.get(id);
+			return row ? parseArtifact(row) : undefined;
+		},
+		listArtifacts(projectId) {
+			return stmts.listArtifacts.all(projectId).map(parseArtifact);
+		},
+	};
+}
+
+function parseArtifact(row) {
+	return {
+		...row,
+		projectId: row.project_id,
+		agentId: row.agent_id,
+		createdAt: row.created_at,
+		meta: safeJson(row.meta, {}),
 	};
 }
 
