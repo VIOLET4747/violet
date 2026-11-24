@@ -1403,13 +1403,18 @@ CLI: --mode rpc|json|print  --tools --exclude-tools --no-builtin-tools
 
 #### M4（5 天）：证据链
 
+> **状态（2026-11-23 收口 v1）**：已完成。仓库外验收脚本 `pi-pentest-acceptance/run-m4.mjs`：确定性 API 23/23 通过；
+> `--agent` 模式额外用真实模型走了一遍 `http_send → finding_submit`。
+> 差异：`http_send` 在宿主进程内执行（node http/https），**没有**容器 + mitmproxy 旁路；验证只比对 status / body_regex / header_regex。
+
 ```
-[ ] http_send 工具（容器内执行 + mitmproxy 旁路 + artifact + sha256）
-[ ] finding schema（zod）+ 服务端闸门（evidence 反查 / scope / 去重）
-[ ] verifier 角色：拿到 poc 重放，比对 expect → verified / disputed
-[ ] 覆盖率表 + coverage_update 工具（三态）
-[ ] 证据查看器 UI（请求/响应双栏、可复制 curl）
-[ ] 验收：故意让 agent 编一个不存在的漏洞 → 被拒；真漏洞 → verified 且有两次独立证据
+[x] http_send 工具（宿主执行 + 完整 request/response 落 artifact + sha256 + scope 拦截）
+[ ] 容器内执行 + mitmproxy 旁路抓包（未做；宿主模式已能防"模型口述证据"）
+[x] finding schema + 服务端闸门（字段/证据反查/必须有 http-response/scope/去重）
+[x] verifier 角色：拿 poc 重放 → 新证据 → 服务端比对 expect → verified / disputed
+[x] 覆盖率表 + coverage_update 工具（confirmed / ruled_out / open_proof_gap；ruled_out 必须有 control_point）
+[x] 证据查看器 UI（request/response 双栏、复制 curl、覆盖率表）
+[x] 验收：伪造证据被拒；合法 finding 候选；新证据重放 verified；expect 不匹配自动 disputed
 ```
 
 #### M5（4 天）：交付

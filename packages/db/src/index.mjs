@@ -81,6 +81,75 @@ CREATE TABLE IF NOT EXISTS artifact (
 	created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_project ON artifact(project_id, created_at);
+
+-- M4：HTTP 证据（一次请求/响应原文）
+CREATE TABLE IF NOT EXISTS http_exchange (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	agent_id TEXT,
+	method TEXT NOT NULL,
+	url TEXT NOT NULL,
+	request_headers TEXT NOT NULL DEFAULT '{}',
+	request_body TEXT,
+	status INTEGER,
+	response_headers TEXT NOT NULL DEFAULT '{}',
+	response_body TEXT,
+	request_artifact TEXT,
+	response_artifact TEXT,
+	duration_ms INTEGER,
+	error TEXT,
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_project ON http_exchange(project_id, created_at);
+
+-- M4：漏洞（候选 → 已验证）
+CREATE TABLE IF NOT EXISTS finding (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	dedupe_key TEXT NOT NULL,
+	title TEXT NOT NULL,
+	category TEXT NOT NULL,
+	severity TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'candidate',
+	target TEXT,
+	summary TEXT,
+	technical_analysis TEXT,
+	impact TEXT,
+	preconditions TEXT NOT NULL DEFAULT '[]',
+	counterevidence TEXT,
+	severity_change_conditions TEXT,
+	confidence TEXT,
+	confidence_rationale TEXT,
+	poc TEXT NOT NULL DEFAULT '{}',
+	found_by TEXT,
+	verified_by TEXT,
+	verified_at INTEGER,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_finding_dedupe ON finding(project_id, dedupe_key);
+
+CREATE TABLE IF NOT EXISTS finding_evidence (
+	finding_id TEXT NOT NULL,
+	artifact_id TEXT NOT NULL,
+	role TEXT NOT NULL DEFAULT 'request',
+	PRIMARY KEY (finding_id, artifact_id)
+);
+
+-- M4：覆盖率账本（confirmed / ruled_out / open_proof_gap）
+CREATE TABLE IF NOT EXISTS coverage (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	test_class TEXT NOT NULL,
+	target TEXT NOT NULL DEFAULT '',
+	outcome TEXT NOT NULL,
+	control_point TEXT,
+	rationale TEXT,
+	evidence_ids TEXT NOT NULL DEFAULT '[]',
+	updated_by TEXT,
+	updated_at INTEGER NOT NULL,
+	UNIQUE(project_id, test_class, target)
+);
 `;
 
 const now = () => Date.now();
@@ -142,6 +211,54 @@ export function openStore(path) {
 		getArtifact: db.prepare("SELECT * FROM artifact WHERE id = ?"),
 		listArtifacts: db.prepare("SELECT * FROM artifact WHERE project_id = ? ORDER BY created_at ASC"),
 		maxArtifactSeq: db.prepare("SELECT COUNT(*) AS count FROM artifact"),
+
+		insertExchange: db.prepare(
+			`INSERT INTO http_exchange
+			 (id, project_id, agent_id, method, url, request_headers, request_body, status, response_headers, response_body, request_artifact, response_artifact, duration_ms, error, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		),
+		getExchange: db.prepare("SELECT * FROM http_exchange WHERE id = ?"),
+		listExchanges: db.prepare("SELECT * FROM http_exchange WHERE project_id = ? ORDER BY created_at ASC"),
+		countExchanges: db.prepare("SELECT COUNT(*) AS count FROM http_exchange"),
+		updateExchangeArtifacts: db.prepare(
+			"UPDATE http_exchange SET request_artifact = ?, response_artifact = ? WHERE id = ?",
+		),
+
+		insertFinding: db.prepare(
+			`INSERT INTO finding
+			 (id, project_id, dedupe_key, title, category, severity, status, target, summary, technical_analysis, impact,
+			  preconditions, counterevidence, severity_change_conditions, confidence, confidence_rationale, poc, found_by,
+			  created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		),
+		getFinding: db.prepare("SELECT * FROM finding WHERE id = ?"),
+		listFindings: db.prepare("SELECT * FROM finding WHERE project_id = ? ORDER BY created_at ASC"),
+		findFindingByDedupe: db.prepare("SELECT * FROM finding WHERE project_id = ? AND dedupe_key = ?"),
+		setFindingStatus: db.prepare("UPDATE finding SET status = ?, verified_by = ?, verified_at = ?, updated_at = ? WHERE id = ?"),
+		countFindings: db.prepare("SELECT COUNT(*) AS count FROM finding"),
+		insertFindingEvidence: db.prepare(
+			"INSERT OR IGNORE INTO finding_evidence (finding_id, artifact_id, role) VALUES (?, ?, ?)",
+		),
+		listFindingEvidence: db.prepare("SELECT * FROM finding_evidence WHERE finding_id = ?"),
+		countFindingEvidence: db.prepare("SELECT COUNT(*) AS count FROM finding_evidence"),
+
+		insertCoverage: db.prepare(
+			`INSERT INTO coverage (id, project_id, test_class, target, outcome, control_point, rationale, evidence_ids, updated_by, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		),
+		getCoverage: db.prepare("SELECT * FROM coverage WHERE project_id = ? AND test_class = ? AND target = ?"),
+		listCoverage: db.prepare("SELECT * FROM coverage WHERE project_id = ? ORDER BY test_class ASC"),
+		updateCoverage: db.prepare(
+			`UPDATE coverage SET outcome = ?, control_point = ?, rationale = ?, evidence_ids = ?, updated_by = ?, updated_at = ?
+			 WHERE id = ?`,
+		),
+		countCoverage: db.prepare("SELECT COUNT(*) AS count FROM coverage"),
+		deleteProjectFindings: db.prepare("DELETE FROM finding WHERE project_id = ?"),
+		deleteProjectFindingEvidence: db.prepare(
+			"DELETE FROM finding_evidence WHERE finding_id IN (SELECT id FROM finding WHERE project_id = ?)",
+		),
+		deleteProjectCoverage: db.prepare("DELETE FROM coverage WHERE project_id = ?"),
+		deleteProjectExchanges: db.prepare("DELETE FROM http_exchange WHERE project_id = ?"),
 	};
 
 	return {
@@ -160,6 +277,10 @@ export function openStore(path) {
 			return stmts.listProjects.all().map(parseProject);
 		},
 		deleteProject(id) {
+			stmts.deleteProjectFindingEvidence.run(id);
+			stmts.deleteProjectFindings.run(id);
+			stmts.deleteProjectCoverage.run(id);
+			stmts.deleteProjectExchanges.run(id);
 			stmts.deleteProjectFacts.run(id);
 			stmts.deleteProjectEvents.run(id);
 			stmts.deleteProjectAgents.run(id);
@@ -300,6 +421,130 @@ export function openStore(path) {
 		listArtifacts(projectId) {
 			return stmts.listArtifacts.all(projectId).map(parseArtifact);
 		},
+
+		/* ---------------------------- M4：HTTP 证据 ---------------------------- */
+		addExchange(exchange) {
+			const count = stmts.countExchanges.get()?.count ?? 0;
+			const id = exchange.id ?? `http-${String(count + 1).padStart(4, "0")}`;
+			stmts.insertExchange.run(
+				id,
+				exchange.projectId,
+				exchange.agentId ?? null,
+				exchange.method,
+				exchange.url,
+				JSON.stringify(exchange.requestHeaders ?? {}),
+				exchange.requestBody ?? null,
+				exchange.status ?? null,
+				JSON.stringify(exchange.responseHeaders ?? {}),
+				exchange.responseBody ?? null,
+				exchange.requestArtifact ?? null,
+				exchange.responseArtifact ?? null,
+				exchange.durationMs ?? null,
+				exchange.error ?? null,
+				now(),
+			);
+			return this.getExchange(id);
+		},
+		getExchange(id) {
+			const row = stmts.getExchange.get(id);
+			return row ? parseExchange(row) : undefined;
+		},
+		listExchanges(projectId) {
+			return stmts.listExchanges.all(projectId).map(parseExchange);
+		},
+		updateExchangeArtifacts(id, requestArtifact, responseArtifact) {
+			stmts.updateExchangeArtifacts.run(requestArtifact ?? null, responseArtifact ?? null, id);
+			return this.getExchange(id);
+		},
+
+		/* ---------------------------- M4：Finding ---------------------------- */
+		addFinding(finding) {
+			const count = stmts.countFindings.get()?.count ?? 0;
+			const id = finding.id ?? `finding-${String(count + 1).padStart(4, "0")}`;
+			stmts.insertFinding.run(
+				id,
+				finding.projectId,
+				finding.dedupeKey,
+				finding.title,
+				finding.category,
+				finding.severity,
+				finding.target ?? null,
+				finding.summary ?? null,
+				finding.technicalAnalysis ?? null,
+				finding.impact ?? null,
+				JSON.stringify(finding.preconditions ?? []),
+				finding.counterevidence ?? null,
+				finding.severityChangeConditions ?? null,
+				finding.confidence ?? null,
+				finding.confidenceRationale ?? null,
+				JSON.stringify(finding.poc ?? {}),
+				finding.foundBy ?? null,
+				now(),
+				now(),
+			);
+			return this.getFinding(id);
+		},
+		getFinding(id) {
+			const row = stmts.getFinding.get(id);
+			return row ? parseFinding(row) : undefined;
+		},
+		listFindings(projectId) {
+			return stmts.listFindings.all(projectId).map(parseFinding);
+		},
+		findFindingByDedupe(projectId, dedupeKey) {
+			const row = stmts.findFindingByDedupe.get(projectId, dedupeKey);
+			return row ? parseFinding(row) : undefined;
+		},
+		setFindingStatus({ id, status, verifiedBy, verifiedAt }) {
+			stmts.setFindingStatus.run(status, verifiedBy ?? null, verifiedAt ?? now(), now(), id);
+			return this.getFinding(id);
+		},
+		addFindingEvidence(findingId, artifactId, role = "request") {
+			stmts.insertFindingEvidence.run(findingId, artifactId, role);
+		},
+		listFindingEvidence(findingId) {
+			return stmts.listFindingEvidence.all(findingId);
+		},
+
+		/* ---------------------------- M4：覆盖率 ---------------------------- */
+		upsertCoverage(entry) {
+			const target = entry.target ?? "";
+			const existing = stmts.getCoverage.get(entry.projectId, entry.testClass, target);
+			if (existing) {
+				stmts.updateCoverage.run(
+					entry.outcome,
+					entry.controlPoint ?? null,
+					entry.rationale ?? null,
+					JSON.stringify(entry.evidenceIds ?? []),
+					entry.updatedBy ?? null,
+					now(),
+					existing.id,
+				);
+				return this.getCoverage(entry.projectId, entry.testClass, target);
+			}
+			const count = stmts.countCoverage.get()?.count ?? 0;
+			const id = `cov-${String(count + 1).padStart(4, "0")}`;
+			stmts.insertCoverage.run(
+				id,
+				entry.projectId,
+				entry.testClass,
+				target,
+				entry.outcome,
+				entry.controlPoint ?? null,
+				entry.rationale ?? null,
+				JSON.stringify(entry.evidenceIds ?? []),
+				entry.updatedBy ?? null,
+				now(),
+			);
+			return this.getCoverage(entry.projectId, entry.testClass, target);
+		},
+		getCoverage(projectId, testClass, target = "") {
+			const row = stmts.getCoverage.get(projectId, testClass, target);
+			return row ? parseCoverage(row) : undefined;
+		},
+		listCoverage(projectId) {
+			return stmts.listCoverage.all(projectId).map(parseCoverage);
+		},
 	};
 }
 
@@ -310,6 +555,50 @@ function parseArtifact(row) {
 		agentId: row.agent_id,
 		createdAt: row.created_at,
 		meta: safeJson(row.meta, {}),
+	};
+}
+
+function parseExchange(row) {
+	return {
+		...row,
+		projectId: row.project_id,
+		agentId: row.agent_id,
+		requestHeaders: safeJson(row.request_headers, {}),
+		responseHeaders: safeJson(row.response_headers, {}),
+		requestArtifact: row.request_artifact,
+		responseArtifact: row.response_artifact,
+		durationMs: row.duration_ms,
+		createdAt: row.created_at,
+	};
+}
+
+function parseFinding(row) {
+	return {
+		...row,
+		projectId: row.project_id,
+		dedupeKey: row.dedupe_key,
+		technicalAnalysis: row.technical_analysis,
+		severityChangeConditions: row.severity_change_conditions,
+		confidenceRationale: row.confidence_rationale,
+		preconditions: safeJson(row.preconditions, []),
+		poc: safeJson(row.poc, {}),
+		foundBy: row.found_by,
+		verifiedBy: row.verified_by,
+		verifiedAt: row.verified_at,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+function parseCoverage(row) {
+	return {
+		...row,
+		projectId: row.project_id,
+		testClass: row.test_class,
+		controlPoint: row.control_point,
+		evidenceIds: safeJson(row.evidence_ids, []),
+		updatedBy: row.updated_by,
+		updatedAt: row.updated_at,
 	};
 }
 

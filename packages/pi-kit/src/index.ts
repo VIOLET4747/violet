@@ -131,8 +131,8 @@ export default function piKit(pi: ExtensionAPI): void {
 			description:
 				"把一个自包含的子任务派发给专职 agent。必须写清：具体目标、要验证的假设、成功判据。本工具立即返回，子 agent 完成后你会收到系统通知。派发后本轮结束，不要重复派发。",
 			parameters: Type.Object({
-				role: Type.Union([Type.Literal("recon"), Type.Literal("jwt")], {
-					description: "子 agent 角色",
+				role: Type.Union([Type.Literal("recon"), Type.Literal("jwt"), Type.Literal("verifier")], {
+					description: "子 agent 角色：recon 侦察 / jwt 专项 / verifier 独立验证",
 				}),
 				objective: Type.String({
 					description: "任务书：目标 + 假设 + 判据，一句话说清",
@@ -337,6 +337,215 @@ export default function piKit(pi: ExtensionAPI): void {
 					content: [{ type: "text", text: `${meta}\n${data.text}` }],
 					details: { totalBytes: data.totalBytes, hasMore: data.hasMore },
 				};
+			},
+		}),
+	);
+
+	/* ------------------------------ M4：证据链 ------------------------------ */
+
+	pi.registerTool(
+		defineTool({
+			name: "http_send",
+			description:
+				"通过平台发 HTTP 请求：完整 request/response 原文会落 artifact（sha256），返回状态码、摘录和 artifact id。所有漏洞声称必须先用它拿到证据，不能只靠推理。目标必须在授权 scope 内。",
+			parameters: Type.Object({
+				url: Type.String({ description: "完整 URL，必须在项目 scope 内" }),
+				method: Type.Optional(Type.String({ description: "HTTP 方法，默认 GET" })),
+				headers: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "请求头" })),
+				body: Type.Optional(Type.String({ description: "请求体（字符串）" })),
+			}),
+			async execute(_toolCallId, params) {
+				const data = await api<{
+					exchangeId: string;
+					status: number | null;
+					bodyExcerpt: string;
+					requestArtifact: string;
+					responseArtifact: string | null;
+					error: string | null;
+				}>("/internal/http/send", {
+					method: "POST",
+					body: JSON.stringify({
+						projectId: PROJECT_ID,
+						agentId: AGENT_ID,
+						method: params.method ?? "GET",
+						url: params.url,
+						headers: params.headers ?? {},
+						body: params.body,
+					}),
+				});
+				log("http_send", { exchangeId: data.exchangeId, status: data.status, url: params.url });
+				const text = [
+					`exchange=${data.exchangeId} status=${data.status ?? "ERROR"}${data.error ? ` error=${data.error}` : ""}`,
+					`artifact: request=${data.requestArtifact} response=${data.responseArtifact ?? "（无，请求失败）"}`,
+					"",
+					data.bodyExcerpt,
+				].join("\n");
+				return {
+					content: [{ type: "text", text }],
+					details: { exchangeId: data.exchangeId, status: data.status, requestArtifact: data.requestArtifact, responseArtifact: data.responseArtifact },
+				};
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
+			name: "finding_submit",
+			description:
+				"提交漏洞候选。服务端会硬校验：字段完整、evidence_ids 真实存在且属于本项目、至少一条 http-response 证据、target 在 scope 内、去重。被拒会返回具体原因，按提示补证据/改字段后重试。",
+			parameters: Type.Object({
+				title: Type.String({ description: "漏洞标题，≥8 字" }),
+				category: Type.String({ description: "类别，如 jwt / idor / auth-bypass" }),
+				severity: Type.String({ description: "critical | high | medium | low | info" }),
+				target: Type.String({ description: "受影响 URL/接口，必须在 scope 内" }),
+				summary: Type.String({ description: "漏洞摘要，≥20 字" }),
+				technical_analysis: Type.String({ description: "技术分析，≥30 字" }),
+				impact: Type.String({ description: "影响，≥20 字" }),
+				preconditions: Type.Array(Type.String(), { description: "前置条件" }),
+				evidence_ids: Type.Array(Type.String(), { description: "证据 artifact id（http_send 返回）" }),
+				poc: Type.Object({
+					type: Type.String({ description: "http | script | manual" }),
+					steps: Type.Array(Type.String(), { description: "可复现步骤，≥1 条" }),
+					expect: Type.Object({
+						match: Type.String({ description: "status | body_regex | header_regex" }),
+						value: Type.String({ description: "匹配值，如 200 或正则" }),
+					}),
+					request_artifact_ids: Type.Optional(Type.Array(Type.String())),
+				}),
+				counterevidence: Type.String({ description: "为什么不是误报，≥10 字" }),
+				severity_change_conditions: Type.Optional(Type.String()),
+				confidence: Type.String({ description: "high | medium | low" }),
+				confidence_rationale: Type.String({ description: "置信度依据，≥10 字" }),
+			}),
+			async execute(_toolCallId, params) {
+				const data = await api<{ finding?: { id: string; status: string }; duplicate_of?: string }>(
+					"/internal/findings/submit",
+					{
+						method: "POST",
+						body: JSON.stringify({ projectId: PROJECT_ID, agentId: AGENT_ID, finding: params }),
+					},
+				);
+				if (data.duplicate_of) {
+					return { content: [{ type: "text", text: `已存在相同 finding：${data.duplicate_of}（未重复创建）` }], details: data };
+				}
+				return {
+					content: [{ type: "text", text: `finding 已提交：${data.finding?.id}（status=${data.finding?.status}，等待 verifier 独立重放）` }],
+					details: data,
+				};
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
+			name: "finding_query",
+			description: "查询本项目的 finding 列表（候选/已验证/争议）。",
+			parameters: Type.Object({
+				status: Type.Optional(Type.String({ description: "candidate | verified | disputed，省略为全部" })),
+			}),
+			async execute(_toolCallId, params) {
+				const data = await api<{
+					findings: Array<{ id: string; title: string; severity: string; status: string; target: string; confidence: string }>;
+				}>(`/internal/findings?projectId=${encodeURIComponent(PROJECT_ID)}`);
+				const list = params.status ? data.findings.filter((item) => item.status === params.status) : data.findings;
+				const lines = list.map(
+					(item) => `${item.id} [${item.status}/${item.severity}] ${item.title} · ${item.target} · confidence=${item.confidence}`,
+				);
+				return { content: [{ type: "text", text: lines.join("\n") || "（暂无 finding）" }], details: { count: list.length } };
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
+			name: "finding_verify",
+			description:
+				"verifier 专用：用独立的新证据重放，服务端会按 poc.expect 自动比对；PASS → verified，FAIL → disputed。不能复用原 finding 的证据。",
+			parameters: Type.Object({
+				finding_id: Type.String({ description: "finding id" }),
+				evidence_ids: Type.Array(Type.String(), { description: "本次重放新产生的 artifact id（http_send 返回）" }),
+				verdict: Type.String({ description: "verified | disputed" }),
+				rationale: Type.Optional(Type.String({ description: "判定说明" })),
+			}),
+			async execute(_toolCallId, params) {
+				const data = await api<{
+					finding: { id: string; status: string };
+					evaluation: { matched: boolean; detail: unknown };
+					note: string;
+				}>("/internal/findings/verify", {
+					method: "POST",
+					body: JSON.stringify({
+						projectId: PROJECT_ID,
+						agentId: AGENT_ID,
+						findingId: params.finding_id,
+						evidenceIds: params.evidence_ids,
+						verdict: params.verdict,
+						rationale: params.rationale ?? "",
+					}),
+				});
+				const text = `finding ${data.finding.id} → ${data.finding.status}（expect matched=${data.evaluation.matched}）\n${data.note}`;
+				return { content: [{ type: "text", text }], details: data };
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
+			name: "coverage_update",
+			description:
+				"更新覆盖率账本：confirmed / ruled_out / open_proof_gap。ruled_out 必须写具体 control_point（文件:行号 / WAF 规则 id），说不出来只能记 open_proof_gap。",
+			parameters: Type.Object({
+				test_class: Type.String({ description: "测试类，如 sqli / jwt / idor" }),
+				outcome: Type.String({ description: "confirmed | ruled_out | open_proof_gap" }),
+				control_point: Type.Optional(Type.String({ description: "ruled_out 必填：具体控制点" })),
+				rationale: Type.Optional(Type.String()),
+				evidence_ids: Type.Optional(Type.Array(Type.String())),
+				target: Type.Optional(Type.String()),
+			}),
+			async execute(_toolCallId, params) {
+				const data = await api<{ coverage: { id: string; outcome: string; testClass: string } }>(
+					"/internal/coverage/update",
+					{
+						method: "POST",
+						body: JSON.stringify({
+							projectId: PROJECT_ID,
+							agentId: AGENT_ID,
+							coverage: {
+								test_class: params.test_class,
+								outcome: params.outcome,
+								control_point: params.control_point,
+								rationale: params.rationale,
+								evidence_ids: params.evidence_ids,
+								target: params.target ?? TARGET,
+							},
+						}),
+					},
+				);
+				return {
+					content: [{ type: "text", text: `coverage 已更新：${data.coverage.testClass} → ${data.coverage.outcome}` }],
+					details: data,
+				};
+			},
+		}),
+	);
+
+	pi.registerTool(
+		defineTool({
+			name: "coverage_query",
+			description: "查询覆盖率账本（哪些已确认 / 已排除 / 仍有证明缺口）。",
+			parameters: Type.Object({
+				outcome: Type.Optional(Type.String({ description: "confirmed | ruled_out | open_proof_gap" })),
+			}),
+			async execute(_toolCallId, params) {
+				const data = await api<{
+					coverage: Array<{ testClass: string; outcome: string; controlPoint?: string; rationale?: string }>;
+				}>(`/internal/coverage?projectId=${encodeURIComponent(PROJECT_ID)}`);
+				const list = params.outcome ? data.coverage.filter((item) => item.outcome === params.outcome) : data.coverage;
+				const lines = list.map(
+					(item) =>
+						`${item.testClass} → ${item.outcome}${item.controlPoint ? `（控制点：${item.controlPoint}）` : ""}${item.rationale ? ` · ${item.rationale}` : ""}`,
+				);
+				return { content: [{ type: "text", text: lines.join("\n") || "（账本为空）" }], details: { count: list.length } };
 			},
 		}),
 	);

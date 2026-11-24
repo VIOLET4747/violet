@@ -220,6 +220,18 @@ Agent 侧工具（recon / jwt 角色可用，只暴露 cmd + mcp）：
 - 模型只看到 `modelOutputChars` 截断文本（头 70% + 尾 30%）+ artifact id；2MB 输出实测子会话仅 18k 字符
 - `runner: docker` 会以 `docker run --rm -v <workspace>:/work ...` 执行；需要本机 Docker daemon 和镜像（本机未验证）
 
+## 证据链与反捏造（M4）
+
+所有对外 HTTP 都走平台工具 `http_send`，证据由平台落盘而不是模型口述：
+
+- **http_send**：记录完整 request/response 原文到 artifact（sha256），返回状态码 + 摘录 + artifact id；target 必须在项目 scope 内
+- **finding 闸门**：`finding_submit` 服务端硬校验 —— 字段完整、`evidence_ids` 真实存在且同项目、至少一条 `http-response` 证据、target 在 scope 内、`dedupe_key` 去重；任何一条不满足直接拒绝并返回具体原因
+- **独立 verifier**：`roles/verifier.md` + `verifier` 角色，看不到 finder 推理，只能拿 `poc` 重放；`finding_verify` 必须使用**新证据**（复用旧证据会被拒），服务端按 `poc.expect`（status / body_regex / header_regex）自动比对：命中 → `verified`，不命中 → `disputed`
+- **覆盖率账本**：`coverage_update` 三态 `confirmed / ruled_out / open_proof_gap`；`ruled_out` 必须写具体 `control_point`，否则只能记 `open_proof_gap`
+- **UI**：左下角「证据」查看 finding 列表、证据详情（request/response 双栏、复制 curl）与覆盖率表
+
+![证据链](docs/screens/m4-findings.png)
+
 ## 验收
 
 验收脚本放在**仓库外**（避免污染项目目录），使用独立 runtime 和端口，不影响日常实例：
@@ -231,6 +243,7 @@ node run.mjs --runs=3              # M1：主→子调度（连续 5 轮用 --ru
 node --no-warnings run-m2.mjs      # M2：预算/Handoff + 硬杀重启/resume（隔离端口 8799）
 node --no-warnings run-m3.mjs      # M3：工具注册表/执行器/artifact + agent 调工具（隔离端口 8798）
 node --no-warnings run-toolbox.mjs # 工具箱：四种类型/直接启动/MCP/AI 用 MCP+命令行（隔离端口 8797）
+node --no-warnings run-m4.mjs      # M4：证据闸门 + verifier 重放 + 覆盖率（隔离端口 8796；--agent 跑真实模型）
 ```
 
 前置：靶场在跑、主平台（8787）已配置模型。M2/M3 脚本会复制主实例的模型配置到隔离 runtime。
@@ -239,6 +252,7 @@ M1 每轮断言：子 agent 出现 / 事实落库 / 父 agent 收到通知 / 有
 M2 断言：低预算触发 `failed + 预算耗尽`、8s 墙钟触发 `failed + 超时`、两者父 agent 都收到交接通知；预算耗尽后 resume 能继续对话；硬杀重启后历史完整、`interrupted`（含指挥官）、resume 后回到 idle 并继续对话；崩溃后补投子 agent 通知。
 M3 断言：YAML 工具增删改 + 下一轮可用、3MB 输出落 artifact 且模型文本有界、artifact raw 可读、JSON parser、超时 kill、子 agent 通过 `run_tool` 调工具且上下文不被撑爆。
 工具箱断言：四种类型 CRUD、分类计数、cmd 后台启动 + artifact、website/gui 干跑、MCP 连接/列 tools/调用、子 agent 通过 `run_tool` 调用 MCP 与命令行工具并写事实。
+M4 断言：http_send 请求/响应原文落 artifact + sha256 + scope 拦截；伪造证据/无 HTTP 证据/越权 target/字段不全的 finding 被拒、重复去重；复用旧证据被拒；新证据重放命中 expect → verified、不命中 → disputed；覆盖率三态与 ruled_out 控制点校验。
 
 ## 已知限制
 
@@ -248,17 +262,19 @@ M3 断言：YAML 工具增删改 + 下一轮可用、3MB 输出落 artifact 且�
 - 网站 / 图形界面工具只供人工启动，不会暴露给 AI
 - GUI 启动后不托管日志/状态（只记录 pid）
 - 工具执行没有并发配额（全局 agent 并发限制仍然生效）
-- 没有证据链、报告导出（M4）
+- 证据链没有 mitmproxy 旁路抓包（M4 只做平台侧 request/response 原文 + sha256），也不能防"模型直接篡改工具日志"之外的本机级作弊
+- verifier 的 `poc.expect` 目前只支持 status / body_regex / header_regex，没有 timing / 截图比对
+- 没有报告导出（M5）
 - 事件回放只覆盖已落库的消息，流式 delta 不落库（刷新后看不到"正在生成"的中间态）
 - 重启恢复是手动触发，不会自动续跑中断的任务
-- 角色只有 commander / recon / jwt 三个
+- 角色有 commander / recon / jwt / verifier 四个
 - 项目目前只有**单目标字段**：填多个地址只能靠模型自行理解，系统级多目标建模尚未做
 
 ## 后续计划
 
-- M4：证据链与可复现报告（http_send + finding 闸门 + verifier）
-- M5：审批/scope 拦截、多目标建模、MCP 市场/模板
-- M6：更多角色 / skills 体系
+- M5：报告与一键复现（DB 驱动渲染 + poc.zip / repro.py），可接 SARIF
+- M6：审批/scope 拦截、多目标建模、MCP 市场/模板
+- M7：更多角色 / skills 体系
 
 ## 常见问题
 

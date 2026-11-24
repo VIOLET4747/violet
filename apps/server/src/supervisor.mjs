@@ -30,15 +30,53 @@ import {
 import { renderBrief } from "./brief.mjs";
 
 const ROLE_TOOLS = {
-	commander: ["dispatch_agent", "fact_write", "fact_query", "get_brief"],
-	recon: ["powershell", "run_tool", "list_tools", "read_artifact", "fact_write", "fact_query", "get_brief"],
-	jwt: ["powershell", "run_tool", "list_tools", "read_artifact", "fact_write", "fact_query", "get_brief"],
+	commander: ["dispatch_agent", "fact_write", "fact_query", "finding_query", "coverage_query", "get_brief"],
+	recon: [
+		"powershell",
+		"run_tool",
+		"list_tools",
+		"read_artifact",
+		"http_send",
+		"finding_submit",
+		"finding_query",
+		"coverage_update",
+		"coverage_query",
+		"fact_write",
+		"fact_query",
+		"get_brief",
+	],
+	jwt: [
+		"powershell",
+		"run_tool",
+		"list_tools",
+		"read_artifact",
+		"http_send",
+		"finding_submit",
+		"finding_query",
+		"coverage_update",
+		"coverage_query",
+		"fact_write",
+		"fact_query",
+		"get_brief",
+	],
+	verifier: [
+		"http_send",
+		"read_artifact",
+		"list_tools",
+		"run_tool",
+		"finding_query",
+		"finding_verify",
+		"fact_write",
+		"fact_query",
+		"get_brief",
+	],
 };
-const ROLE_LABELS = { commander: "指挥官", recon: "侦察员", jwt: "JWT 专家" };
+const ROLE_LABELS = { commander: "指挥官", recon: "侦察员", jwt: "JWT 专家", verifier: "独立验证者" };
 const ROLE_OBJECTIVES = {
 	commander: "负责项目的渗透测试调度与结论汇总（不直接接触目标）",
 	recon: "对目标做信息收集，把可复用的发现写入事实库",
 	jwt: "对目标做 JWT 专项测试，验证 alg=none / 弱密钥 / claim 篡改",
+	verifier: "独立重放其他 agent 提交的 finding PoC，用新证据验证漏洞是否真实",
 };
 const TERMINAL_STATUSES = new Set(["idle", "failed", "aborted", "error"]);
 

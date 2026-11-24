@@ -27,6 +27,7 @@ import {
 import { openStore } from "../../../packages/db/src/index.mjs";
 import { Supervisor, seedIdCounter } from "./supervisor.mjs";
 import { McpManager } from "./mcp.mjs";
+import { EvidenceService } from "./evidence.mjs";
 import { ToolRegistry } from "./tools.mjs";
 import { DB_PATH, RUNTIME } from "./config.mjs";
 
@@ -73,6 +74,7 @@ const supervisor = new Supervisor({
 
 const mcpManager = new McpManager();
 const toolRegistry = new ToolRegistry({ store, broadcast, mcp: mcpManager });
+const evidenceService = new EvidenceService({ store, broadcast });
 
 const server = createServer(async (req, res) => {
 	try {
@@ -264,7 +266,34 @@ async function routeApi(req, res, url) {
 		}
 	}
 
-	// ---------------------------- 项目 ----------------------------
+	// ---------------------------- M4：finding / 证据 ----------------------------
+	const findingMatch = /^\/api\/findings\/([^/]+)(?:\/(verify))?$/.exec(path);
+	if (findingMatch) {
+		const findingId = findingMatch[1];
+		if (findingMatch[2] === "verify" && method === "POST") {
+			const body = await readJson(req);
+			const finding = store.getFinding(findingId);
+			if (!finding) return sendJson(res, 404, { error: "finding 不存在" });
+			try {
+				const result = await evidenceService.verifyFinding({
+					projectId: finding.projectId,
+					agentId: body.agentId ?? null,
+					findingId,
+					evidenceIds: body.evidenceIds ?? body.evidence_ids,
+					verdict: body.verdict,
+					rationale: body.rationale ?? "",
+				});
+				return sendJson(res, 200, result);
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (method === "GET") {
+			const detail = evidenceService.findingDetail(findingId);
+			return detail ? sendJson(res, 200, detail) : sendJson(res, 404, { error: "finding 不存在" });
+		}
+	}
+
 	if (path === "/api/projects" && method === "GET") {
 		return sendJson(res, 200, { projects: store.listProjects() });
 	}
@@ -329,6 +358,61 @@ async function routeApi(req, res, url) {
 
 		if (rest === "artifacts" && method === "GET") {
 			return sendJson(res, 200, { artifacts: store.listArtifacts(projectId) });
+		}
+
+		// ---------------------------- M4：证据 / finding / coverage ----------------------------
+		if (rest === "findings" && method === "GET") {
+			return sendJson(res, 200, { findings: evidenceService.listFindings(projectId) });
+		}
+
+		if (rest === "findings" && method === "POST") {
+			const body = await readJson(req);
+			try {
+				const result = await evidenceService.submitFinding({ projectId, agentId: body.agentId ?? null, input: body });
+				return sendJson(res, result.duplicate_of ? 200 : 201, result);
+			} catch (error) {
+				return sendJson(res, 400, {
+					error: String(error?.message ?? error),
+					code: error?.code ?? "FINDING_REJECTED",
+					details: error?.details,
+				});
+			}
+		}
+
+		if (rest === "coverage" && method === "GET") {
+			return sendJson(res, 200, { coverage: store.listCoverage(projectId) });
+		}
+
+		if (rest === "coverage" && method === "POST") {
+			const body = await readJson(req);
+			try {
+				const coverage = await evidenceService.updateCoverage({ projectId, agentId: body.agentId ?? null, input: body });
+				return sendJson(res, 200, { coverage });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+
+		if (rest === "http-send" && method === "POST") {
+			const body = await readJson(req);
+			try {
+				const result = await evidenceService.httpSend({
+					projectId,
+					agentId: body.agentId ?? null,
+					method: body.method,
+					url: body.url,
+					headers: body.headers ?? {},
+					body: body.body,
+					timeoutMs: body.timeoutMs,
+				});
+				return sendJson(res, 200, { result });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+
+		if (rest === "exchanges" && method === "GET") {
+			return sendJson(res, 200, { exchanges: store.listExchanges(projectId) });
 		}
 
 		if (rest === "events" && method === "GET") {
@@ -499,6 +583,109 @@ async function routeInternal(req, res, url) {
 		} catch (error) {
 			return sendJson(res, 404, { error: String(error?.message ?? error) });
 		}
+	}
+
+	// ---------------------------- M4：证据 / finding / coverage ----------------------------
+	if (path === "/internal/http/send" && method === "POST") {
+		const body = await readJson(req);
+		if (!body.projectId || !body.url) return sendJson(res, 400, { error: "projectId / url 必填" });
+		try {
+			const result = await evidenceService.httpSend({
+				projectId: body.projectId,
+				agentId: body.agentId ?? null,
+				method: body.method,
+				url: body.url,
+				headers: body.headers ?? {},
+				body: body.body,
+				timeoutMs: body.timeoutMs,
+			});
+			return sendJson(res, 200, result);
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+
+	if (path === "/internal/findings/submit" && method === "POST") {
+		const body = await readJson(req);
+		if (!body.projectId) return sendJson(res, 400, { error: "projectId 必填" });
+		try {
+			const result = await evidenceService.submitFinding({
+				projectId: body.projectId,
+				agentId: body.agentId ?? null,
+				input: body.finding ?? body,
+			});
+			return sendJson(res, 200, result);
+		} catch (error) {
+			return sendJson(res, 400, {
+				error: String(error?.message ?? error),
+				code: error?.code ?? "FINDING_REJECTED",
+				details: error?.details,
+			});
+		}
+	}
+
+	if (path === "/internal/findings/verify" && method === "POST") {
+		const body = await readJson(req);
+		if (!body.projectId || !body.findingId) return sendJson(res, 400, { error: "projectId / findingId 必填" });
+		try {
+			const result = await evidenceService.verifyFinding({
+				projectId: body.projectId,
+				agentId: body.agentId ?? null,
+				findingId: body.findingId,
+				evidenceIds: body.evidenceIds ?? body.evidence_ids,
+				verdict: body.verdict,
+				rationale: body.rationale ?? "",
+			});
+			return sendJson(res, 200, result);
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+
+	if (path === "/internal/coverage/update" && method === "POST") {
+		const body = await readJson(req);
+		if (!body.projectId) return sendJson(res, 400, { error: "projectId 必填" });
+		try {
+			const coverage = await evidenceService.updateCoverage({
+				projectId: body.projectId,
+				agentId: body.agentId ?? null,
+				input: body.coverage ?? body,
+			});
+			return sendJson(res, 200, { coverage });
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+
+	if (path === "/internal/findings" && method === "GET") {
+		const projectId = url.searchParams.get("projectId");
+		if (!projectId) return sendJson(res, 400, { error: "projectId 必填" });
+		return sendJson(res, 200, {
+			findings: evidenceService.listFindings(projectId).map((finding) => ({
+				id: finding.id,
+				title: finding.title,
+				category: finding.category,
+				severity: finding.severity,
+				status: finding.status,
+				target: finding.target,
+				confidence: finding.confidence,
+				poc: finding.poc,
+				evidenceCount: finding.evidenceCount,
+			})),
+		});
+	}
+
+	if (path === "/internal/finding" && method === "GET") {
+		const findingId = url.searchParams.get("findingId");
+		if (!findingId) return sendJson(res, 400, { error: "findingId 必填" });
+		const detail = evidenceService.findingDetail(findingId);
+		return detail ? sendJson(res, 200, detail) : sendJson(res, 404, { error: "finding 不存在" });
+	}
+
+	if (path === "/internal/coverage" && method === "GET") {
+		const projectId = url.searchParams.get("projectId");
+		if (!projectId) return sendJson(res, 400, { error: "projectId 必填" });
+		return sendJson(res, 200, { coverage: store.listCoverage(projectId) });
 	}
 
 	return sendJson(res, 404, { error: `未知内部接口: ${path}` });

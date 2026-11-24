@@ -6,6 +6,7 @@ import { Conversation } from "./components/Conversation.jsx";
 import { NewProjectDialog, FactsDialog } from "./components/Dialogs.jsx";
 import { SettingsPage } from "./components/SettingsPage.jsx";
 import { ToolsPage } from "./components/ToolsPage.jsx";
+import { FindingsDialog } from "./components/FindingsDialog.jsx";
 import { ModelSetup } from "./components/ModelSetup.jsx";
 
 function useProjectStream(projectId, onEvent, enabled = true) {
@@ -60,10 +61,16 @@ export default function App() {
 		document.body.classList.add("standalone");
 		return <StandaloneAgent agentId={agent} projectId={project} streamEnabled={params.get("static") !== "1"} />;
 	}
-	return <MainApp streamEnabled={params.get("static") !== "1"} initialTools={params.get("tools") === "1"} />;
+	return (
+		<MainApp
+			streamEnabled={params.get("static") !== "1"}
+			initialTools={params.get("tools") === "1"}
+			initialFindings={params.get("findings") === "1"}
+		/>
+	);
 }
 
-function MainApp({ streamEnabled = true, initialTools = false }) {
+function MainApp({ streamEnabled = true, initialTools = false, initialFindings = false }) {
 	const [config, setConfig] = useState(null);
 	const [projects, setProjects] = useState([]);
 	const [projectId, setProjectId] = useState(null);
@@ -77,6 +84,8 @@ function MainApp({ streamEnabled = true, initialTools = false }) {
 	const [showNewProject, setShowNewProject] = useState(false);
 	const [showFacts, setShowFacts] = useState(false);
 	const [showTools, setShowTools] = useState(initialTools);
+	const [showFindings, setShowFindings] = useState(initialFindings);
+	const [findings, setFindings] = useState([]);
 	const [error, setError] = useState("");
 	const [backendOnline, setBackendOnline] = useState(true);
 	const [limits, setLimits] = useState(null);
@@ -130,16 +139,19 @@ function MainApp({ streamEnabled = true, initialTools = false }) {
 		if (!projectId) return;
 		setAgents([]);
 		setFacts([]);
+		setFindings([]);
 		setSelectedId(null);
 		setMessagesByAgent({});
 		setLoadedAgents(new Set());
 		Promise.all([
 			api.get(`/api/projects/${projectId}/agents`),
 			api.get(`/api/projects/${projectId}/facts`),
+			api.get(`/api/projects/${projectId}/findings`),
 		])
-			.then(([agentData, factData]) => {
+			.then(([agentData, factData, findingData]) => {
 				setAgents(agentData.agents);
 				setFacts(factData.facts);
+				setFindings(findingData.findings);
 				const root = agentData.agents.find((item) => !item.parentId) ?? agentData.agents[0];
 				if (root) setSelectedId(root.id);
 			})
@@ -180,6 +192,13 @@ function MainApp({ streamEnabled = true, initialTools = false }) {
 		}
 		if (type === "fact.created") {
 			setFacts((prev) => (prev.some((item) => item.id === payload.fact.id) ? prev : [...prev, payload.fact]));
+			return;
+		}
+		if (type === "finding.created" || type === "finding.updated") {
+			setFindings((prev) => {
+				const exists = prev.some((item) => item.id === payload.finding.id);
+				return exists ? prev.map((item) => (item.id === payload.finding.id ? { ...item, ...payload.finding } : item)) : [...prev, payload.finding];
+			});
 		}
 	}, []);
 
@@ -287,6 +306,10 @@ function MainApp({ streamEnabled = true, initialTools = false }) {
 						<span>事实库</span>
 						<span className="fact-count">{facts.length}</span>
 					</button>
+					<button className="foot-btn" onClick={() => setShowFindings(true)}>
+						<span>证据</span>
+						<span className="fact-count">{findings.length}</span>
+					</button>
 					<button className="foot-btn" onClick={() => setShowTools(true)}>
 						<span>工具箱</span>
 						<span className="fact-count">YAML</span>
@@ -334,6 +357,7 @@ function MainApp({ streamEnabled = true, initialTools = false }) {
 			) : null}
 			{showFacts ? <FactsDialog facts={facts} onClose={() => setShowFacts(false)} /> : null}
 			{showTools ? <ToolsPage onClose={() => setShowTools(false)} /> : null}
+			{showFindings ? <FindingsDialog projectId={projectId} onClose={() => setShowFindings(false)} /> : null}
 			{showNewProject ? (
 				<NewProjectDialog
 					configured={config.configured}
