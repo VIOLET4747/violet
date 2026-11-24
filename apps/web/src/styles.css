@@ -2163,7 +2163,7 @@ select:focus {
 }
 
 .finding-item.active {
-	background: #1c2432;
+	background: var(--nav-active);
 	color: var(--text);
 }
 
@@ -2179,7 +2179,7 @@ select:focus {
 	padding: 1px 5px;
 	border-radius: 4px;
 	text-transform: uppercase;
-	background: #242a35;
+	background: var(--bg-hover);
 	color: var(--dim);
 }
 
@@ -2202,7 +2202,7 @@ select:focus {
 	font-size: 10px;
 	padding: 1px 5px;
 	border-radius: 4px;
-	background: #242a35;
+	background: var(--bg-hover);
 	color: var(--faint);
 	white-space: nowrap;
 }
@@ -2396,7 +2396,7 @@ select:focus {
 .roles-grid input,
 .roles-grid select,
 .tools-input {
-	background: #0a0c10;
+	background: var(--bg-code);
 	border: 1px solid var(--border);
 	border-radius: 7px;
 	padding: 8px 10px;
@@ -2437,7 +2437,7 @@ select:focus {
 }
 
 .approval-card {
-	background: #151a23;
+	background: var(--bg-elev);
 	border: 1px solid rgba(226, 179, 65, 0.45);
 	border-radius: 10px;
 	padding: 12px;
@@ -2462,7 +2462,7 @@ select:focus {
 
 .approval-args {
 	margin: 0;
-	background: #0a0c10;
+	background: var(--bg-code);
 	border: 1px solid var(--border);
 	border-radius: 6px;
 	padding: 8px;
@@ -2471,7 +2471,7 @@ select:focus {
 	max-height: 160px;
 	overflow: auto;
 	white-space: pre-wrap;
-	color: #b7bcc7;
+	color: var(--code-text);
 }
 
 .approval-actions {
@@ -2526,7 +2526,7 @@ select:focus {
 
 .cost-bar {
 	height: 6px;
-	background: #0a0c10;
+	background: var(--bg-code);
 	border-radius: 999px;
 	overflow: hidden;
 	margin: 4px 0;
