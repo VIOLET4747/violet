@@ -1,0 +1,36 @@
+id: nmap
+name: Nmap 端口扫描
+type: cmd
+category: 单点信息收集
+icon: "🎯"
+version: "1.0"
+description: 对目标做端口/服务扫描。需要本地构建 pi-pentest-toolbox 镜像（见 docs 说明）或把 runner 改成 host。
+risk: active
+runner: docker
+image: pi-pentest-toolbox:latest
+argv:
+  - nmap
+  - -sV
+  - -Pn
+  - --top-ports
+  - "{ports}"
+  - -oN
+  - /work/nmap-{run}.txt
+  - "{target}"
+params:
+  - name: target
+    type: string
+    required: true
+    description: IP 或域名
+  - name: ports
+    type: number
+    default: 1000
+    description: top-ports 数量
+  - name: run
+    type: number
+    default: 1
+    description: 输出文件名后缀（用时间戳避免覆盖）
+timeoutSec: 900
+modelOutputChars: 8000
+maxOutputBytes: 52428800
+parser: text

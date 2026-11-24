@@ -1,0 +1,29 @@
+id: http-probe
+name: HTTP 探测
+type: cmd
+category: 单点信息收集
+icon: "🌐"
+version: "1.0"
+description: 用 curl 拉取一个 URL 的响应头与正文（GET）。
+risk: passive
+runner: host
+argv:
+  - curl
+  - -s
+  - -i
+  - --max-time
+  - "{timeout}"
+  - "{url}"
+params:
+  - name: url
+    type: string
+    required: true
+    description: 目标 URL（必须在授权范围内）
+  - name: timeout
+    type: number
+    default: 15
+    description: 请求超时（秒）
+timeoutSec: 60
+modelOutputChars: 6000
+maxOutputBytes: 10485760
+parser: text

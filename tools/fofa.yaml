@@ -1,0 +1,10 @@
+id: fofa
+name: FOFA 空间测绘
+type: website
+category: 批量信息收集
+icon: "🔭"
+version: "1.0"
+description: 打开 FOFA 搜索页面，人工查询资产（网站类工具只供人工使用，AI 不可调用）。
+homepage: https://fofa.info
+url: https://fofa.info/result?qbase64=
+risk: passive

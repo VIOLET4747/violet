@@ -1,0 +1,22 @@
+id: emit-json
+name: JSON 输出示例
+type: cmd
+category: 综合工具
+icon: "{}"
+version: "1.0"
+description: 演示 parser=json：工具输出 JSON 时，平台会解析成结构化结果。
+risk: passive
+runner: host
+argv:
+  - node
+  - -e
+  - "const target=process.argv[1]||'example.com';process.stdout.write(JSON.stringify({target,status:'ok',items:[1,2,3]}));"
+  - "{target}"
+params:
+  - name: target
+    type: string
+    default: example.com
+    description: 任意字符串
+timeoutSec: 30
+modelOutputChars: 4000
+parser: json

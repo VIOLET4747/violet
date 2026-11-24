@@ -1,0 +1,38 @@
+id: nuclei
+name: Nuclei 模板扫描
+type: cmd
+category: 批量信息收集
+icon: "☢️"
+version: "1.0"
+description: 用 nuclei 模板做漏洞扫描（JSONL 输出）。需要 pi-pentest-toolbox 镜像 + 模板。
+risk: active
+runner: docker
+image: pi-pentest-toolbox:latest
+argv:
+  - nuclei
+  - -u
+  - "{target}"
+  - -jsonl
+  - -silent
+  - -severity
+  - "{severity}"
+  - -o
+  - /work/nuclei-{run}.jsonl
+params:
+  - name: target
+    type: string
+    required: true
+    description: 目标 URL
+  - name: severity
+    type: enum
+    values: [critical, high, medium, low, info, "critical,high,medium"]
+    default: "critical,high,medium"
+    description: 严重级别
+  - name: run
+    type: number
+    default: 1
+    description: 输出文件名后缀
+timeoutSec: 1800
+modelOutputChars: 8000
+maxOutputBytes: 33554432
+parser: text

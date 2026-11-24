@@ -1,0 +1,27 @@
+id: httpx
+name: httpx 存活/指纹探测
+type: cmd
+category: 批量信息收集
+icon: "📡"
+version: "1.0"
+description: 对 URL 列表做存活与指纹探测（JSONL 输出）。需要 pi-pentest-toolbox 镜像。
+risk: active
+runner: docker
+image: pi-pentest-toolbox:latest
+argv:
+  - httpx
+  - -u
+  - "{target}"
+  - -json
+  - -silent
+  - -title
+  - -tech-detect
+params:
+  - name: target
+    type: string
+    required: true
+    description: 目标 URL
+timeoutSec: 300
+modelOutputChars: 8000
+maxOutputBytes: 20971520
+parser: text

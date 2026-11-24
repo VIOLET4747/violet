@@ -1,0 +1,23 @@
+id: bigout
+name: 大输出测试
+type: cmd
+category: 综合工具
+icon: "🔧"
+version: "1.0"
+description: 生成指定大小的输出，用于验证「输出落 artifact + 模型只看截断文本」。M3 验收用。
+risk: passive
+runner: host
+argv:
+  - node
+  - -e
+  - "const kb=Number(process.argv[1]||3000);process.stdout.write('A'.repeat(kb*1024));"
+  - "{size}"
+params:
+  - name: size
+    type: number
+    default: 3000
+    description: 输出大小（KB）
+timeoutSec: 60
+modelOutputChars: 4000
+maxOutputBytes: 52428800
+parser: text
