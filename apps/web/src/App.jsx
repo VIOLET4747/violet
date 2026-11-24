@@ -340,19 +340,15 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 					</button>
 					<button className="foot-btn" onClick={() => setShowReport(true)}>
 						<span>报告</span>
-						<span className="fact-count">M5</span>
 					</button>
 					<button className="foot-btn" onClick={() => setShowCost(true)}>
 						<span>成本</span>
-						<span className="fact-count">M7</span>
 					</button>
 					<button className="foot-btn" onClick={() => setShowRoles(true)}>
 						<span>角色</span>
-						<span className="fact-count">Skills</span>
 					</button>
 					<button className="foot-btn" onClick={() => setShowTools(true)}>
 						<span>工具箱</span>
-						<span className="fact-count">YAML</span>
 					</button>
 					<button className="foot-btn" onClick={() => setShowSettings(true)}>
 						<span className={`dot ${streamEnabled ? streamStatus : "live"}`} />
