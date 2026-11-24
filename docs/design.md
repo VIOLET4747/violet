@@ -1419,11 +1419,15 @@ CLI: --mode rpc|json|print  --tools --exclude-tools --no-builtin-tools
 
 #### M5（4 天）：交付
 
+> **状态（2026-11-24 收口 v1）**：已完成。仓库外验收脚本 `pi-pentest-acceptance/run-m5.mjs`：23/23 通过；
+> 包含「解压到独立目录 → `python repro.py` → PASS」的跨机器复现验证。
+> 差异：没有 SARIF；修复建议是确定性模板（未接 LLM 润色）；PDF 用本机 Chromium 打印（无 Chromium 时 HTML 可用）。
+
 ```
-[ ] 报告模板（目标/授权/资产/漏洞/覆盖/未发现说明）
-[ ] PoC 生成：request artifact → curl + repro.py + verify.py
-[ ] 导出：md/html/pdf（Chromium 打印）/ poc.zip / evidence.zip
-[ ] 验收：把 poc.zip 拷到新机器，`python repro.py` 返回 PASS
+[x] 报告模板（目标/授权/资产/漏洞/覆盖/未发现说明）
+[x] PoC 生成：request artifact → curl(repro.sh) + repro.py + verify.py + expected.json
+[x] 导出：md / html / pdf（Chromium 打印）/ poc.zip / evidence.zip
+[x] 验收：poc.zip 解压到独立目录，`python repro.py` 返回 PASS
 ```
 
 #### M6（8 天，可与 M4/M5 并行）

@@ -2331,6 +2331,23 @@ select:focus {
 	font-size: 11px;
 }
 
+/* 报告 */
+.report-modal {
+	width: 980px;
+	max-width: calc(100vw - 40px);
+	height: calc(100vh - 90px);
+	display: flex;
+	flex-direction: column;
+}
+
+.report-preview {
+	flex: 1;
+	width: 100%;
+	border: 0;
+	background: #fff;
+	border-radius: 0 0 10px 10px;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar {
 	width: 8px;

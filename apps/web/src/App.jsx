@@ -7,6 +7,7 @@ import { NewProjectDialog, FactsDialog } from "./components/Dialogs.jsx";
 import { SettingsPage } from "./components/SettingsPage.jsx";
 import { ToolsPage } from "./components/ToolsPage.jsx";
 import { FindingsDialog } from "./components/FindingsDialog.jsx";
+import { ReportDialog } from "./components/ReportDialog.jsx";
 import { ModelSetup } from "./components/ModelSetup.jsx";
 
 function useProjectStream(projectId, onEvent, enabled = true) {
@@ -66,11 +67,12 @@ export default function App() {
 			streamEnabled={params.get("static") !== "1"}
 			initialTools={params.get("tools") === "1"}
 			initialFindings={params.get("findings") === "1"}
+			initialReport={params.get("report") === "1"}
 		/>
 	);
 }
 
-function MainApp({ streamEnabled = true, initialTools = false, initialFindings = false }) {
+function MainApp({ streamEnabled = true, initialTools = false, initialFindings = false, initialReport = false }) {
 	const [config, setConfig] = useState(null);
 	const [projects, setProjects] = useState([]);
 	const [projectId, setProjectId] = useState(null);
@@ -85,6 +87,7 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 	const [showFacts, setShowFacts] = useState(false);
 	const [showTools, setShowTools] = useState(initialTools);
 	const [showFindings, setShowFindings] = useState(initialFindings);
+	const [showReport, setShowReport] = useState(initialReport);
 	const [findings, setFindings] = useState([]);
 	const [error, setError] = useState("");
 	const [backendOnline, setBackendOnline] = useState(true);
@@ -310,6 +313,10 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 						<span>证据</span>
 						<span className="fact-count">{findings.length}</span>
 					</button>
+					<button className="foot-btn" onClick={() => setShowReport(true)}>
+						<span>报告</span>
+						<span className="fact-count">M5</span>
+					</button>
 					<button className="foot-btn" onClick={() => setShowTools(true)}>
 						<span>工具箱</span>
 						<span className="fact-count">YAML</span>
@@ -358,6 +365,7 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 			{showFacts ? <FactsDialog facts={facts} onClose={() => setShowFacts(false)} /> : null}
 			{showTools ? <ToolsPage onClose={() => setShowTools(false)} /> : null}
 			{showFindings ? <FindingsDialog projectId={projectId} onClose={() => setShowFindings(false)} /> : null}
+			{showReport ? <ReportDialog projectId={projectId} onClose={() => setShowReport(false)} /> : null}
 			{showNewProject ? (
 				<NewProjectDialog
 					configured={config.configured}

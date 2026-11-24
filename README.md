@@ -232,6 +232,18 @@ Agent 侧工具（recon / jwt 角色可用，只暴露 cmd + mcp）：
 
 ![证据链](docs/screens/m4-findings.png)
 
+## 报告与一键复现（M5）
+
+报告完全由数据库确定性渲染（finding / coverage / artifact / exchange / fact / agent_run），模型不参与写报告：
+
+- **report.md / report.html / report.pdf**：目标、授权声明、测试窗口、执行摘要、漏洞详情（摘要/分析/影响/前置条件/反证/复现步骤/请求响应原文/curl/修复建议）、覆盖率与"未发现"说明、附录。默认只导出 `verified`，`?candidates=1` 可带候选/争议
+- **poc.zip**：每条 verified finding 一个 `poc/<finding-id>/`，含 `repro.py`（Python 标准库，无第三方依赖）、`verify.py`、`repro.sh`、`expected.json`、原始 request/response；拷到新机器 `python repro.py` 输出 PASS/FAIL
+- **evidence.zip**：全部 artifact 原文 + `manifest.json`（id / kind / bytes / sha256）
+- **PDF**：用本机 Chromium/Chrome 打印（`CHROME_PATH` 可指定）；找不到时 HTML 仍可用
+- **UI**：左下角「报告」可预览 + 一键下载 MD / HTML / PDF / PoC ZIP / 证据 ZIP
+
+![报告](docs/screens/m5-report.png)
+
 ## 验收
 
 验收脚本放在**仓库外**（避免污染项目目录），使用独立 runtime 和端口，不影响日常实例：
@@ -244,6 +256,7 @@ node --no-warnings run-m2.mjs      # M2：预算/Handoff + 硬杀重启/resume�
 node --no-warnings run-m3.mjs      # M3：工具注册表/执行器/artifact + agent 调工具（隔离端口 8798）
 node --no-warnings run-toolbox.mjs # 工具箱：四种类型/直接启动/MCP/AI 用 MCP+命令行（隔离端口 8797）
 node --no-warnings run-m4.mjs      # M4：证据闸门 + verifier 重放 + 覆盖率（隔离端口 8796；--agent 跑真实模型）
+node --no-warnings run-m5.mjs      # M5：报告 md/html/pdf + poc.zip + 新机器 python repro.py（隔离端口 8795）
 ```
 
 前置：靶场在跑、主平台（8787）已配置模型。M2/M3 脚本会复制主实例的模型配置到隔离 runtime。
@@ -253,6 +266,7 @@ M2 断言：低预算触发 `failed + 预算耗尽`、8s 墙钟触发 `failed + 
 M3 断言：YAML 工具增删改 + 下一轮可用、3MB 输出落 artifact 且模型文本有界、artifact raw 可读、JSON parser、超时 kill、子 agent 通过 `run_tool` 调工具且上下文不被撑爆。
 工具箱断言：四种类型 CRUD、分类计数、cmd 后台启动 + artifact、website/gui 干跑、MCP 连接/列 tools/调用、子 agent 通过 `run_tool` 调用 MCP 与命令行工具并写事实。
 M4 断言：http_send 请求/响应原文落 artifact + sha256 + scope 拦截；伪造证据/无 HTTP 证据/越权 target/字段不全的 finding 被拒、重复去重；复用旧证据被拒；新证据重放命中 expect → verified、不命中 → disputed；覆盖率三态与 ruled_out 控制点校验。
+M5 断言：md/html/pdf 三格式可下载且含 finding/证据/覆盖率/授权；候选默认排除；poc.zip 结构完整（repro.py 只用标准库）；解压到独立目录 `python repro.py` PASS、`verify.py` 退出码 0；evidence.zip 含 manifest 与 sha256。
 
 ## 已知限制
 
@@ -264,7 +278,8 @@ M4 断言：http_send 请求/响应原文落 artifact + sha256 + scope 拦截；
 - 工具执行没有并发配额（全局 agent 并发限制仍然生效）
 - 证据链没有 mitmproxy 旁路抓包（M4 只做平台侧 request/response 原文 + sha256），也不能防"模型直接篡改工具日志"之外的本机级作弊
 - verifier 的 `poc.expect` 目前只支持 status / body_regex / header_regex，没有 timing / 截图比对
-- 没有报告导出（M5）
+- 报告没有 SARIF 导出；报告里的"修复建议"是按 category 的确定性模板，不是逐条 LLM 润色
+- PoC 里的 HTTP headers 未脱敏（默认原样导出，分享前请自行检查是否有 token/cookie）
 - 事件回放只覆盖已落库的消息，流式 delta 不落库（刷新后看不到"正在生成"的中间态）
 - 重启恢复是手动触发，不会自动续跑中断的任务
 - 角色有 commander / recon / jwt / verifier 四个
@@ -272,9 +287,8 @@ M4 断言：http_send 请求/响应原文落 artifact + sha256 + scope 拦截；
 
 ## 后续计划
 
-- M5：报告与一键复现（DB 驱动渲染 + poc.zip / repro.py），可接 SARIF
 - M6：审批/scope 拦截、多目标建模、MCP 市场/模板
-- M7：更多角色 / skills 体系
+- M7：更多角色 / skills 体系、SARIF / CI 集成
 
 ## 常见问题
 

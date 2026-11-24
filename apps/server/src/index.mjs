@@ -28,6 +28,8 @@ import { openStore } from "../../../packages/db/src/index.mjs";
 import { Supervisor, seedIdCounter } from "./supervisor.mjs";
 import { McpManager } from "./mcp.mjs";
 import { EvidenceService } from "./evidence.mjs";
+import { buildReportData, renderMarkdown, renderHtml, renderPdf } from "./report.mjs";
+import { buildPocZip, buildEvidenceZip } from "./poc.mjs";
 import { ToolRegistry } from "./tools.mjs";
 import { DB_PATH, RUNTIME } from "./config.mjs";
 
@@ -413,6 +415,80 @@ async function routeApi(req, res, url) {
 
 		if (rest === "exchanges" && method === "GET") {
 			return sendJson(res, 200, { exchanges: store.listExchanges(projectId) });
+		}
+
+		// ---------------------------- M5：报告 / 导出 ----------------------------
+		const includeCandidates = url.searchParams.get("candidates") === "1";
+		const reportData = () =>
+			buildReportData({ store, evidenceService, projectId, includeCandidates });
+
+		if ((rest === "report.md" || rest === "report.html" || rest === "report.pdf") && method === "GET") {
+			const data = reportData();
+			if (rest === "report.md") {
+				const markdown = renderMarkdown(data);
+				res.writeHead(200, {
+					"content-type": "text/markdown; charset=utf-8",
+					"content-disposition": `attachment; filename="report-${projectId}.md"`,
+				});
+				res.end(markdown);
+				return;
+			}
+			if (rest === "report.html") {
+				const html = renderHtml(data);
+				res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+				res.end(html);
+				return;
+			}
+			const html = renderHtml(data);
+			const pdf = await renderPdf({ projectId, html });
+			res.writeHead(200, {
+				"content-type": "application/pdf",
+				"content-disposition": `attachment; filename="report-${projectId}.pdf"`,
+			});
+			res.end(pdf);
+			return;
+		}
+
+		if (rest === "report" && method === "GET") {
+			const data = reportData();
+			return sendJson(res, 200, {
+				summary: {
+					project: data.project,
+					generatedAt: data.generatedAt,
+					findings: data.findings.length,
+					severity: data.severityCounts,
+					coverage: data.coverageCounts,
+				},
+				downloads: {
+					markdown: `/api/projects/${projectId}/report.md${includeCandidates ? "?candidates=1" : ""}`,
+					html: `/api/projects/${projectId}/report.html${includeCandidates ? "?candidates=1" : ""}`,
+					pdf: `/api/projects/${projectId}/report.pdf${includeCandidates ? "?candidates=1" : ""}`,
+					pocZip: `/api/projects/${projectId}/export/poc.zip`,
+					evidenceZip: `/api/projects/${projectId}/export/evidence.zip`,
+				},
+			});
+		}
+
+		if (rest === "export/poc.zip" && method === "GET") {
+			const data = reportData();
+			const zip = await buildPocZip({ data, store, evidenceService });
+			res.writeHead(200, {
+				"content-type": "application/zip",
+				"content-disposition": `attachment; filename="poc-${projectId}.zip"`,
+			});
+			res.end(zip);
+			return;
+		}
+
+		if (rest === "export/evidence.zip" && method === "GET") {
+			const data = reportData();
+			const zip = await buildEvidenceZip({ data, store });
+			res.writeHead(200, {
+				"content-type": "application/zip",
+				"content-disposition": `attachment; filename="evidence-${projectId}.zip"`,
+			});
+			res.end(zip);
+			return;
 		}
 
 		if (rest === "events" && method === "GET") {
