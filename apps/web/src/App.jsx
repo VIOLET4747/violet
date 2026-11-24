@@ -8,6 +8,9 @@ import { SettingsPage } from "./components/SettingsPage.jsx";
 import { ToolsPage } from "./components/ToolsPage.jsx";
 import { FindingsDialog } from "./components/FindingsDialog.jsx";
 import { ReportDialog } from "./components/ReportDialog.jsx";
+import { RolesPage } from "./components/RolesPage.jsx";
+import { ApprovalPanel } from "./components/ApprovalPanel.jsx";
+import { CostDialog } from "./components/CostDialog.jsx";
 import { ModelSetup } from "./components/ModelSetup.jsx";
 
 function useProjectStream(projectId, onEvent, enabled = true) {
@@ -68,11 +71,13 @@ export default function App() {
 			initialTools={params.get("tools") === "1"}
 			initialFindings={params.get("findings") === "1"}
 			initialReport={params.get("report") === "1"}
+			initialRoles={params.get("roles") === "1"}
+			initialCost={params.get("cost") === "1"}
 		/>
 	);
 }
 
-function MainApp({ streamEnabled = true, initialTools = false, initialFindings = false, initialReport = false }) {
+function MainApp({ streamEnabled = true, initialTools = false, initialFindings = false, initialReport = false, initialRoles = false, initialCost = false }) {
 	const [config, setConfig] = useState(null);
 	const [projects, setProjects] = useState([]);
 	const [projectId, setProjectId] = useState(null);
@@ -88,6 +93,9 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 	const [showTools, setShowTools] = useState(initialTools);
 	const [showFindings, setShowFindings] = useState(initialFindings);
 	const [showReport, setShowReport] = useState(initialReport);
+	const [showRoles, setShowRoles] = useState(initialRoles);
+	const [showCost, setShowCost] = useState(initialCost);
+	const [approvals, setApprovals] = useState([]);
 	const [findings, setFindings] = useState([]);
 	const [error, setError] = useState("");
 	const [backendOnline, setBackendOnline] = useState(true);
@@ -146,15 +154,18 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 		setSelectedId(null);
 		setMessagesByAgent({});
 		setLoadedAgents(new Set());
+		setApprovals([]);
 		Promise.all([
 			api.get(`/api/projects/${projectId}/agents`),
 			api.get(`/api/projects/${projectId}/facts`),
 			api.get(`/api/projects/${projectId}/findings`),
+			api.get(`/api/approvals?projectId=${projectId}&status=pending`),
 		])
-			.then(([agentData, factData, findingData]) => {
+			.then(([agentData, factData, findingData, approvalData]) => {
 				setAgents(agentData.agents);
 				setFacts(factData.facts);
 				setFindings(findingData.findings);
+				setApprovals(approvalData.approvals ?? []);
 				const root = agentData.agents.find((item) => !item.parentId) ?? agentData.agents[0];
 				if (root) setSelectedId(root.id);
 			})
@@ -202,6 +213,15 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 				const exists = prev.some((item) => item.id === payload.finding.id);
 				return exists ? prev.map((item) => (item.id === payload.finding.id ? { ...item, ...payload.finding } : item)) : [...prev, payload.finding];
 			});
+			return;
+		}
+		if (type === "approval.created" || type === "approval.updated") {
+			const approval = payload.approval;
+			setApprovals((prev) => {
+				const next = prev.filter((item) => item.id !== approval.id);
+				return approval.status === "pending" ? [...next, approval] : next;
+			});
+			return;
 		}
 	}, []);
 
@@ -243,6 +263,11 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 	async function resumeAgent(agentId) {
 		const data = await api.post(`/api/agents/${agentId}/resume`, {});
 		setAgents((prev) => prev.map((item) => (item.id === agentId ? data.agent : item)));
+	}
+
+	async function decideApproval(approvalId, status) {
+		await api.post(`/api/approvals/${approvalId}/decide`, { status });
+		setApprovals((prev) => prev.filter((item) => item.id !== approvalId));
 	}
 
 	function popout(item) {
@@ -317,6 +342,14 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 						<span>报告</span>
 						<span className="fact-count">M5</span>
 					</button>
+					<button className="foot-btn" onClick={() => setShowCost(true)}>
+						<span>成本</span>
+						<span className="fact-count">M7</span>
+					</button>
+					<button className="foot-btn" onClick={() => setShowRoles(true)}>
+						<span>角色</span>
+						<span className="fact-count">Skills</span>
+					</button>
 					<button className="foot-btn" onClick={() => setShowTools(true)}>
 						<span>工具箱</span>
 						<span className="fact-count">YAML</span>
@@ -366,6 +399,9 @@ function MainApp({ streamEnabled = true, initialTools = false, initialFindings =
 			{showTools ? <ToolsPage onClose={() => setShowTools(false)} /> : null}
 			{showFindings ? <FindingsDialog projectId={projectId} onClose={() => setShowFindings(false)} /> : null}
 			{showReport ? <ReportDialog projectId={projectId} onClose={() => setShowReport(false)} /> : null}
+			{showRoles ? <RolesPage onClose={() => setShowRoles(false)} /> : null}
+			{showCost ? <CostDialog projectId={projectId} onClose={() => setShowCost(false)} /> : null}
+			<ApprovalPanel approvals={approvals} onDecided={decideApproval} />
 			{showNewProject ? (
 				<NewProjectDialog
 					configured={config.configured}

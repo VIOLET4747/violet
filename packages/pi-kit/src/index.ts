@@ -124,6 +124,36 @@ export default function piKit(pi: ExtensionAPI): void {
 
 	pi.on("agent_settled", () => log("agent_settled"));
 
+	// M7：所有工具调用先过审批（shell / 高风险 run_tool 会阻塞等待人工决定；超时 fail-closed）
+	pi.on("tool_call", async (event) => {
+		const toolName = (event as unknown as { toolName?: string }).toolName ?? "unknown";
+		const input = (event as unknown as { input?: unknown }).input ?? {};
+		try {
+			const decision = await api<{ status: string; reason?: string; risk?: string; auto?: boolean }>(
+				"/internal/approvals/request",
+				{
+					method: "POST",
+					body: JSON.stringify({
+						projectId: PROJECT_ID,
+						agentId: AGENT_ID,
+						role: ROLE,
+						tool: toolName,
+						args: input,
+					}),
+				},
+			);
+			if (decision.status === "approved") return;
+			log("tool_blocked", { tool: toolName, status: decision.status, risk: decision.risk });
+			return {
+				block: true,
+				reason: `工具调用未通过审批（${decision.status}）：${decision.reason ?? "需要人工确认"}`,
+			};
+		} catch (error) {
+			log("approval_error", { tool: toolName, error: String(error) });
+			return { block: true, reason: `审批服务不可用，按 fail-closed 拒绝：${String(error?.message ?? error)}` };
+		}
+	});
+
 	pi.registerTool(
 		defineTool({
 			name: "dispatch_agent",

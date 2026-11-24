@@ -1432,22 +1432,31 @@ CLI: --mode rpc|json|print  --tools --exclude-tools --no-builtin-tools
 
 #### M6（8 天，可与 M4/M5 并行）
 
+> **状态（2026-11-25 收口 v1）**：Skills / 角色配置 / 字典管理已完成，仓库外验收脚本 `run-m6.mjs`：30/30。
+> 并行工作线已完成工具箱 UI 与 MCP（server CRUD / 健康检查 / 工具预览 / 手动调用）。
+> 剩余：MCP 按角色授权、session_start 动态注册、字典与工具参数模板联动。
+
 ```
-[ ] 工具箱 UI：工具 CRUD / YAML 编辑 / 试跑 / 启停
-[ ] MCP：server CRUD / 健康检查 / 工具预览 / 按角色授权 / session_start 动态注册
-[ ] skills：目录规范 + 角色-技能白名单（--skill）+ 编辑器
-[ ] 角色配置 UI（模型档位、工具白名单、预算）
-[ ] 字典管理
+[x] 工具箱 UI：工具 CRUD / YAML 编辑 / 试跑 / 启停（并行工作线完成）
+[~] MCP：server CRUD / 健康检查 / 工具预览（已完成）；按角色授权 / session_start 动态注册（未做）
+[x] skills：目录规范 + 角色-技能白名单（--skill）+ 编辑器 + frontmatter 校验
+[x] 角色配置 UI（模型档位、thinking、工具白名单、技能白名单、预算）+ spawn.config 审计
+[x] 字典管理（.runtime/wordlists，CRUD + 行数统计）
 ```
 
 #### M7（持续）
 
+> **状态（2026-11-25 收口 v1）**：审批队列 + fail-closed + 审计、按项目并发配额、成本面板与阈值告警、SARIF 导出已完成；
+> 仓库外验收脚本 `run-m7.mjs`：19/19。
+> 未完成：容器出网白名单（mitmproxy/iptables）、审批 allowlist、审计查询 UI、多用户/租户。
+
 ```
-[ ] 容器出网白名单（mitmproxy/iptables）
-[ ] 审批队列 UI + 超时 fail-closed + 审计日志
-[ ] 多项目并发与配额
-[ ] 成本面板与告警
-[ ] 多用户/租户（如果需要）
+[x] 审批队列 UI + 超时 fail-closed + 审计日志（.runtime/audit.log）
+[x] 多项目并发与配额（PENTEST_MAX_CONCURRENCY_PER_PROJECT）
+[x] 成本面板与告警（/api/usage + usage.warning）
+[x] SARIF 导出（report.sarif, 2.1.0）
+[ ] 容器出网白名单（mitmproxy/iptables）——未做
+[ ] 多用户/租户（如需要）——未做
 ```
 
 ### D.4 六周日历（单人）

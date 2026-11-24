@@ -129,6 +129,22 @@ CREATE TABLE IF NOT EXISTS finding (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_finding_dedupe ON finding(project_id, dedupe_key);
 
+-- M7：工具审批队列
+CREATE TABLE IF NOT EXISTS approval (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	agent_id TEXT,
+	tool TEXT NOT NULL,
+	args TEXT NOT NULL DEFAULT '{}',
+	risk TEXT NOT NULL DEFAULT 'high',
+	reason TEXT,
+	status TEXT NOT NULL DEFAULT 'pending',
+	decided_by TEXT,
+	decided_at INTEGER,
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_approval_project ON approval(project_id, created_at);
+
 CREATE TABLE IF NOT EXISTS finding_evidence (
 	finding_id TEXT NOT NULL,
 	artifact_id TEXT NOT NULL,
@@ -259,6 +275,19 @@ export function openStore(path) {
 		),
 		deleteProjectCoverage: db.prepare("DELETE FROM coverage WHERE project_id = ?"),
 		deleteProjectExchanges: db.prepare("DELETE FROM http_exchange WHERE project_id = ?"),
+		deleteProjectApprovals: db.prepare("DELETE FROM approval WHERE project_id = ?"),
+
+		insertApproval: db.prepare(
+			`INSERT INTO approval (id, project_id, agent_id, tool, args, risk, reason, status, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+		),
+		getApproval: db.prepare("SELECT * FROM approval WHERE id = ?"),
+		listApprovals: db.prepare("SELECT * FROM approval WHERE project_id = ? ORDER BY created_at ASC"),
+		listAllApprovals: db.prepare("SELECT * FROM approval ORDER BY created_at ASC"),
+		decideApproval: db.prepare(
+			"UPDATE approval SET status = ?, decided_by = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
+		),
+		countApprovals: db.prepare("SELECT COUNT(*) AS count FROM approval"),
 	};
 
 	return {
@@ -285,6 +314,7 @@ export function openStore(path) {
 			stmts.deleteProjectEvents.run(id);
 			stmts.deleteProjectAgents.run(id);
 			stmts.deleteProjectArtifacts.run(id);
+			stmts.deleteProjectApprovals.run(id);
 			stmts.deleteProject.run(id);
 		},
 
@@ -545,6 +575,36 @@ export function openStore(path) {
 		listCoverage(projectId) {
 			return stmts.listCoverage.all(projectId).map(parseCoverage);
 		},
+
+		/* ---------------------------- M7：审批 ---------------------------- */
+		addApproval(approval) {
+			const count = stmts.countApprovals.get()?.count ?? 0;
+			const id = `ap-${String(count + 1).padStart(4, "0")}`;
+			stmts.insertApproval.run(
+				id,
+				approval.projectId,
+				approval.agentId ?? null,
+				approval.tool,
+				JSON.stringify(approval.args ?? {}),
+				approval.risk ?? "high",
+				approval.reason ?? null,
+				now(),
+			);
+			return this.getApproval(id);
+		},
+		getApproval(id) {
+			const row = stmts.getApproval.get(id);
+			return row ? parseApproval(row) : undefined;
+		},
+		listApprovals(projectId) {
+			return projectId
+				? stmts.listApprovals.all(projectId).map(parseApproval)
+				: stmts.listAllApprovals.all().map(parseApproval);
+		},
+		decideApproval({ id, status, decidedBy }) {
+			stmts.decideApproval.run(status, decidedBy ?? "ui", now(), id);
+			return this.getApproval(id);
+		},
 	};
 }
 
@@ -600,6 +660,58 @@ function parseCoverage(row) {
 		updatedBy: row.updated_by,
 		updatedAt: row.updated_at,
 	};
+}
+
+function parseApproval(row) {
+	return {
+		...row,
+		projectId: row.project_id,
+		agentId: row.agent_id,
+		args: safeJson(row.args, {}),
+		decidedBy: row.decided_by,
+		decidedAt: row.decided_at,
+		createdAt: row.created_at,
+	};
+}
+
+/** M7：按项目聚合 agent 用量（成本面板用） */
+export function usageByProject(store, projectId) {
+	const agents = store.listAgents(projectId);
+	return aggregateUsage(agents, projectId);
+}
+
+/** 通用聚合：agent 列表 → 项目/角色/agent 三级总额 */
+export function aggregateUsage(agents, projectId) {
+	const total = { tokensIn: 0, tokensOut: 0, cost: 0, turns: 0, agents: agents.length };
+	const byRole = {};
+	const byAgent = [];
+	for (const agent of agents) {
+		const tokensIn = agent.tokensIn ?? 0;
+		const tokensOut = agent.tokensOut ?? 0;
+		const cost = agent.cost ?? 0;
+		total.tokensIn += tokensIn;
+		total.tokensOut += tokensOut;
+		total.cost += cost;
+		total.turns += agent.turns ?? 0;
+		const role = (byRole[agent.role] = byRole[agent.role] ?? { role: agent.role, agents: 0, tokensIn: 0, tokensOut: 0, cost: 0 });
+		role.agents += 1;
+		role.tokensIn += tokensIn;
+		role.tokensOut += tokensOut;
+		role.cost += cost;
+		byAgent.push({
+			id: agent.id,
+			role: agent.role,
+			status: agent.status,
+			tokensIn,
+			tokensOut,
+			cost,
+			turns: agent.turns ?? 0,
+			model: agent.model,
+			startedAt: agent.startedAt,
+			endedAt: agent.endedAt,
+		});
+	}
+	return { projectId, total, byRole: Object.values(byRole), byAgent };
 }
 
 function parseProject(row) {

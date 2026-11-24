@@ -28,9 +28,14 @@ import { openStore } from "../../../packages/db/src/index.mjs";
 import { Supervisor, seedIdCounter } from "./supervisor.mjs";
 import { McpManager } from "./mcp.mjs";
 import { EvidenceService } from "./evidence.mjs";
-import { buildReportData, renderMarkdown, renderHtml, renderPdf } from "./report.mjs";
+import { buildReportData, renderMarkdown, renderHtml, renderPdf, renderSarif } from "./report.mjs";
 import { buildPocZip, buildEvidenceZip } from "./poc.mjs";
+import { listRoles, saveRole, resetRole } from "./roles.mjs";
+import { listSkills, findSkill, saveSkill, deleteSkill } from "./skills.mjs";
+import { listWordlists, getWordlist, saveWordlist, deleteWordlist } from "./wordlists.mjs";
+import { ApprovalBroker } from "./approvals.mjs";
 import { ToolRegistry } from "./tools.mjs";
+import { aggregateUsage } from "../../../packages/db/src/index.mjs";
 import { DB_PATH, RUNTIME } from "./config.mjs";
 
 ensureRuntimeDirs();
@@ -77,6 +82,7 @@ const supervisor = new Supervisor({
 const mcpManager = new McpManager();
 const toolRegistry = new ToolRegistry({ store, broadcast, mcp: mcpManager });
 const evidenceService = new EvidenceService({ store, broadcast });
+const approvalBroker = new ApprovalBroker({ store, broadcast, toolRegistry });
 
 const server = createServer(async (req, res) => {
 	try {
@@ -268,6 +274,137 @@ async function routeApi(req, res, url) {
 		}
 	}
 
+	// ---------------------------- M6：角色 / Skills / 字典 ----------------------------
+	if (path === "/api/roles" && method === "GET") {
+		return sendJson(res, 200, { roles: listRoles() });
+	}
+
+	const roleMatch = /^\/api\/roles\/([a-z]+)(?:\/(reset))?$/.exec(path);
+	if (roleMatch) {
+		const role = roleMatch[1];
+		if (roleMatch[2] === "reset" && method === "POST") {
+			try {
+				return sendJson(res, 200, { config: resetRole(role) });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (method === "PUT") {
+			const body = await readJson(req);
+			try {
+				return sendJson(res, 200, { config: saveRole(role, body) });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+	}
+
+	if (path === "/api/skills" && method === "GET") {
+		return sendJson(res, 200, { skills: listSkills() });
+	}
+
+	const skillMatch = /^\/api\/skills\/([a-z0-9-]+)$/.exec(path);
+	if (skillMatch) {
+		const skillId = skillMatch[1];
+		if (method === "GET") {
+			const skill = findSkill(skillId);
+			return skill ? sendJson(res, 200, { skill }) : sendJson(res, 404, { error: "技能不存在" });
+		}
+		if (method === "PUT") {
+			const body = await readJson(req);
+			try {
+				return sendJson(res, 200, { skill: saveSkill(skillId, body.content ?? "") });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (method === "DELETE") {
+			return sendJson(res, deleteSkill(skillId) ? 200 : 404, { ok: true });
+		}
+	}
+
+	if (path === "/api/wordlists" && method === "GET") {
+		return sendJson(res, 200, { wordlists: listWordlists() });
+	}
+
+	const wordlistMatch = /^\/api\/wordlists\/([a-z0-9._-]+)$/.exec(path);
+	if (wordlistMatch) {
+		const name = wordlistMatch[1];
+		if (method === "GET") {
+			const wordlist = getWordlist(name);
+			return wordlist ? sendJson(res, 200, { wordlist }) : sendJson(res, 404, { error: "字典不存在" });
+		}
+		if (method === "PUT") {
+			const body = await readJson(req);
+			try {
+				return sendJson(res, 200, { wordlist: saveWordlist(name, body.content ?? "") });
+			} catch (error) {
+				return sendJson(res, 400, { error: String(error?.message ?? error) });
+			}
+		}
+		if (method === "DELETE") {
+			return sendJson(res, deleteWordlist(name) ? 200 : 404, { ok: true });
+		}
+	}
+
+	// ---------------------------- M7：审批 / 审计 / 用量 ----------------------------
+	if (path === "/api/approvals" && method === "GET") {
+		const projectId = url.searchParams.get("projectId") ?? undefined;
+		const status = url.searchParams.get("status");
+		const approvals = approvalBroker.list(projectId).filter((approval) => !status || approval.status === status);
+		return sendJson(res, 200, { approvals });
+	}
+
+	const approvalMatch = /^\/api\/approvals\/([^/]+)\/decide$/.exec(path);
+	if (approvalMatch && method === "POST") {
+		const body = await readJson(req);
+		try {
+			const approval = approvalBroker.decide(approvalMatch[1], body.status, body.decidedBy ?? "ui", body.reason ?? "");
+			return sendJson(res, 200, { approval });
+		} catch (error) {
+			return sendJson(res, 400, { error: String(error?.message ?? error) });
+		}
+	}
+
+	if (path === "/api/audit" && method === "GET") {
+		const limit = Number(url.searchParams.get("limit") ?? 200) || 200;
+		return sendJson(res, 200, { audit: approvalBroker.readAudit(limit) });
+	}
+
+	if (path === "/api/usage" && method === "GET") {
+		const projectId = url.searchParams.get("projectId");
+		if (projectId) {
+			const project = store.getProject(projectId);
+			if (!project) return sendJson(res, 404, { error: "项目不存在" });
+			const usage = aggregateUsage(store.listAgents(projectId), projectId);
+			const tokens = usage.total.tokensIn + usage.total.tokensOut;
+			return sendJson(res, 200, {
+				usage,
+				limits: {
+					projectTokenLimit: LIMITS.projectTokenLimit,
+					projectCostLimit: LIMITS.projectCostLimit,
+				},
+				overLimit:
+					(LIMITS.projectTokenLimit > 0 && tokens > LIMITS.projectTokenLimit) ||
+					(LIMITS.projectCostLimit > 0 && usage.total.cost > LIMITS.projectCostLimit),
+			});
+		}
+		const projects = store.listProjects().map((item) => {
+			const usage = aggregateUsage(store.listAgents(item.id), item.id);
+			return { projectId: item.id, name: item.name, usage: usage.total };
+		});
+		const total = projects.reduce(
+			(acc, item) => ({
+				tokensIn: acc.tokensIn + item.usage.tokensIn,
+				tokensOut: acc.tokensOut + item.usage.tokensOut,
+				cost: acc.cost + item.usage.cost,
+				turns: acc.turns + item.usage.turns,
+			}),
+			{ tokensIn: 0, tokensOut: 0, cost: 0, turns: 0 },
+		);
+		return sendJson(res, 200, { total, projects, limits: { projectTokenLimit: LIMITS.projectTokenLimit, projectCostLimit: LIMITS.projectCostLimit } });
+	}
+
 	// ---------------------------- M4：finding / 证据 ----------------------------
 	const findingMatch = /^\/api\/findings\/([^/]+)(?:\/(verify))?$/.exec(path);
 	if (findingMatch) {
@@ -323,6 +460,7 @@ async function routeApi(req, res, url) {
 		if (!rest && method === "GET") return sendJson(res, 200, { project });
 
 		if (!rest && method === "DELETE") {
+			approvalBroker.cancelProject(projectId);
 			await supervisor.stopProject(projectId);
 			store.deleteProject(projectId);
 			// 项目删除后同步清掉 runtime 目录（会话 / 工具产物），避免残留
@@ -422,7 +560,7 @@ async function routeApi(req, res, url) {
 		const reportData = () =>
 			buildReportData({ store, evidenceService, projectId, includeCandidates });
 
-		if ((rest === "report.md" || rest === "report.html" || rest === "report.pdf") && method === "GET") {
+		if ((rest === "report.md" || rest === "report.html" || rest === "report.pdf" || rest === "report.sarif") && method === "GET") {
 			const data = reportData();
 			if (rest === "report.md") {
 				const markdown = renderMarkdown(data);
@@ -437,6 +575,15 @@ async function routeApi(req, res, url) {
 				const html = renderHtml(data);
 				res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
 				res.end(html);
+				return;
+			}
+			if (rest === "report.sarif") {
+				const sarif = renderSarif(data);
+				res.writeHead(200, {
+					"content-type": "application/sarif+json; charset=utf-8",
+					"content-disposition": `attachment; filename="report-${projectId}.sarif"`,
+				});
+				res.end(JSON.stringify(sarif, null, 2));
 				return;
 			}
 			const html = renderHtml(data);
@@ -463,6 +610,7 @@ async function routeApi(req, res, url) {
 					markdown: `/api/projects/${projectId}/report.md${includeCandidates ? "?candidates=1" : ""}`,
 					html: `/api/projects/${projectId}/report.html${includeCandidates ? "?candidates=1" : ""}`,
 					pdf: `/api/projects/${projectId}/report.pdf${includeCandidates ? "?candidates=1" : ""}`,
+					sarif: `/api/projects/${projectId}/report.sarif${includeCandidates ? "?candidates=1" : ""}`,
 					pocZip: `/api/projects/${projectId}/export/poc.zip`,
 					evidenceZip: `/api/projects/${projectId}/export/evidence.zip`,
 				},
@@ -522,6 +670,11 @@ async function routeApi(req, res, url) {
 
 		if (!rest && method === "GET") {
 			return sendJson(res, 200, { agent: { ...agent, connected: supervisor.hasClient(agentId) } });
+		}
+
+		if (rest === "config" && method === "GET") {
+			const events = store.eventsForAgent(agentId).filter((event) => event.type === "spawn.config");
+			return sendJson(res, 200, { config: events.at(-1)?.payload ?? null });
 		}
 
 		if (rest === "messages" && method === "GET") {
@@ -762,6 +915,19 @@ async function routeInternal(req, res, url) {
 		const projectId = url.searchParams.get("projectId");
 		if (!projectId) return sendJson(res, 400, { error: "projectId 必填" });
 		return sendJson(res, 200, { coverage: store.listCoverage(projectId) });
+	}
+
+	if (path === "/internal/approvals/request" && method === "POST") {
+		const body = await readJson(req);
+		if (!body.projectId || !body.tool) return sendJson(res, 400, { error: "projectId / tool 必填" });
+		const decision = await approvalBroker.request({
+			projectId: body.projectId,
+			agentId: body.agentId ?? null,
+			role: body.role ?? null,
+			tool: body.tool,
+			args: body.args ?? {},
+		});
+		return sendJson(res, 200, decision);
 	}
 
 	return sendJson(res, 404, { error: `未知内部接口: ${path}` });

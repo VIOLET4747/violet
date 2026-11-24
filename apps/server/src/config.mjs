@@ -76,6 +76,16 @@ export const LIMITS = {
 	maxTokens: Math.floor(positiveNumber(process.env.PENTEST_MAX_TOKENS, 400_000)),
 	/** 预算软提醒阈值：到 80% 时提示 agent 收尾。 */
 	budgetSoftRatio: 0.8,
+	/** 单项目同时运行的 agent 上限（M7 多项目配额）。 */
+	maxConcurrentPerProject: Math.floor(positiveNumber(process.env.PENTEST_MAX_CONCURRENCY_PER_PROJECT, 2)),
+	/** 工具审批等待上限，超时按 fail-closed 拒绝（M7）。 */
+	approvalTimeoutMs: positiveNumber(process.env.PENTEST_APPROVAL_TIMEOUT_MS, 120 * 1000),
+	/** off=全放行；risk=shell / 高风险工具需审批；all=所有工具都审批（默认 off，需显式开启）。 */
+	approvalMode: process.env.PENTEST_APPROVAL_MODE ?? "off",
+	/** 项目 token 预警阈值（0=关闭）。 */
+	projectTokenLimit: Math.floor(positiveNumber(process.env.PENTEST_PROJECT_TOKEN_LIMIT, 0)) || 0,
+	/** 项目成本预警阈值（0=关闭）。 */
+	projectCostLimit: positiveNumber(process.env.PENTEST_PROJECT_COST_LIMIT, 0) || 0,
 };
 
 /* ---------------------------------- 配置 ---------------------------------- */

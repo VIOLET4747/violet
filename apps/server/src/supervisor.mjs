@@ -28,56 +28,11 @@ import {
 	resolvePiCliPath,
 } from "./config.mjs";
 import { renderBrief } from "./brief.mjs";
+import { DEFAULT_ROLES, getRoleConfig, roleSkillPaths } from "./roles.mjs";
 
-const ROLE_TOOLS = {
-	commander: ["dispatch_agent", "fact_write", "fact_query", "finding_query", "coverage_query", "get_brief"],
-	recon: [
-		"powershell",
-		"run_tool",
-		"list_tools",
-		"read_artifact",
-		"http_send",
-		"finding_submit",
-		"finding_query",
-		"coverage_update",
-		"coverage_query",
-		"fact_write",
-		"fact_query",
-		"get_brief",
-	],
-	jwt: [
-		"powershell",
-		"run_tool",
-		"list_tools",
-		"read_artifact",
-		"http_send",
-		"finding_submit",
-		"finding_query",
-		"coverage_update",
-		"coverage_query",
-		"fact_write",
-		"fact_query",
-		"get_brief",
-	],
-	verifier: [
-		"http_send",
-		"read_artifact",
-		"list_tools",
-		"run_tool",
-		"finding_query",
-		"finding_verify",
-		"fact_write",
-		"fact_query",
-		"get_brief",
-	],
-};
-const ROLE_LABELS = { commander: "指挥官", recon: "侦察员", jwt: "JWT 专家", verifier: "独立验证者" };
-const ROLE_OBJECTIVES = {
-	commander: "负责项目的渗透测试调度与结论汇总（不直接接触目标）",
-	recon: "对目标做信息收集，把可复用的发现写入事实库",
-	jwt: "对目标做 JWT 专项测试，验证 alg=none / 弱密钥 / claim 篡改",
-	verifier: "独立重放其他 agent 提交的 finding PoC，用新证据验证漏洞是否真实",
-};
+const ROLE_TOOLS = Object.fromEntries(Object.entries(DEFAULT_ROLES).map(([role, def]) => [role, def.tools]));
+const ROLE_LABELS = Object.fromEntries(Object.entries(DEFAULT_ROLES).map(([role, def]) => [role, def.label]));
+const ROLE_OBJECTIVES = Object.fromEntries(Object.entries(DEFAULT_ROLES).map(([role, def]) => [role, def.objective]));
 const TERMINAL_STATUSES = new Set(["idle", "failed", "aborted", "error"]);
 
 let counter = 0;
@@ -110,6 +65,7 @@ export class Supervisor {
 		this.queue = []; // 等待启动的 agentId
 		this.active = new Set(); // 正在占用并发槽的 agentId
 		this.kickoffs = new Map(); // agentId -> 启动后要下发的第一条消息
+		this.warnedProjects = new Set(); // 已发过用量预警的项目
 		this.pendingNotices = new Map(); // parentId -> string[]
 		this.noticeTimers = new Map(); // parentId -> {debounce?, maxWait?}
 	}
@@ -119,8 +75,16 @@ export class Supervisor {
 		return Boolean(ctx?.client) && !ctx.client.closed;
 	}
 
-	hasCapacity() {
-		return this.active.size < LIMITS.maxConcurrentAgents;
+	hasCapacity(projectId) {
+		if (this.active.size >= LIMITS.maxConcurrentAgents) return false;
+		if (projectId) {
+			let runningInProject = 0;
+			for (const id of this.active) {
+				if (this.store.getAgent(id)?.projectId === projectId) runningInProject += 1;
+			}
+			if (runningInProject >= LIMITS.maxConcurrentPerProject) return false;
+		}
+		return true;
 	}
 
 	/* ------------------------------ 项目 ------------------------------ */
@@ -153,14 +117,14 @@ export class Supervisor {
 	async createAgent({ projectId, parentId, role, objective, targets, factIds }) {
 		const project = this.store.getProject(projectId);
 		if (!project) throw new Error(`项目不存在: ${projectId}`);
-		if (!ROLE_TOOLS[role]) throw new Error(`未知角色: ${role}`);
+		if (!DEFAULT_ROLES[role]) throw new Error(`未知角色: ${role}`);
 		if (parentId) {
 			const children = this.store.listAgents(projectId).filter((agent) => agent.parentId);
 			if (children.length >= LIMITS.maxChildrenPerProject) {
 				throw new Error(`本项目子 agent 已达上限 ${LIMITS.maxChildrenPerProject}，请先汇总现有结论`);
 			}
 		}
-		const activeModel = activeModelEnv();
+		const activeModel = getRoleConfig(role).model ?? activeModelEnv();
 		if (!activeModel) throw new Error("未配置模型：请先在「模型设置」里填写 API");
 
 		const { provider, model } = activeModel;
@@ -181,13 +145,38 @@ export class Supervisor {
 		return this.store.getAgent(agent.id);
 	}
 
+	/** M7：项目 token/成本超过阈值时广播一次预警（成本面板高亮） */
+	checkProjectUsage(projectId) {
+		const tokenLimit = LIMITS.projectTokenLimit;
+		const costLimit = LIMITS.projectCostLimit;
+		if ((!tokenLimit || tokenLimit <= 0) && (!costLimit || costLimit <= 0)) return;
+		if (this.warnedProjects.has(projectId)) return;
+		const agents = this.store.listAgents(projectId);
+		const tokens = agents.reduce((sum, agent) => sum + (agent.tokensIn ?? 0) + (agent.tokensOut ?? 0), 0);
+		const cost = agents.reduce((sum, agent) => sum + (agent.cost ?? 0), 0);
+		const over =
+			(tokenLimit > 0 && tokens > tokenLimit) || (costLimit > 0 && cost > costLimit);
+		if (!over) return;
+		this.warnedProjects.add(projectId);
+		this.broadcast({
+			projectId,
+			type: "usage.warning",
+			payload: { tokens, cost, tokenLimit, costLimit, at: Date.now() },
+		});
+	}
+
 	/* ------------------------------ 队列与启动 ------------------------------ */
 
 	pump() {
-		while (this.queue.length > 0 && this.hasCapacity()) {
-			const agentId = this.queue.shift();
+		while (this.queue.length > 0) {
+			const agentId = this.queue[0];
 			const agent = this.store.getAgent(agentId);
-			if (!agent || agent.status !== "queued") continue;
+			if (!agent || agent.status !== "queued") {
+				this.queue.shift();
+				continue;
+			}
+			if (!this.hasCapacity(agent.projectId)) break;
+			this.queue.shift();
 			this.active.add(agentId);
 			this.startAgent(agent).catch((error) => {
 				this.finishAgent(agentId, "failed", `启动失败: ${String(error?.message ?? error)}`);
@@ -233,7 +222,7 @@ export class Supervisor {
 			if (this.clients.get(agentId)) this.clients.delete(agentId);
 			this.active.delete(agentId);
 		}
-		if (!this.hasCapacity()) throw new Error("并发已满，请稍后再试");
+		if (!this.hasCapacity(agent.projectId)) throw new Error("并发已满，请稍后再试");
 		this.active.add(agentId);
 		this.setStatus(agentId, "starting");
 		try {
@@ -255,9 +244,12 @@ export class Supervisor {
 		const roleFile = join(ROLES_DIR, `${agent.role}.md`);
 		if (!existsSync(roleFile)) throw new Error(`角色提示词缺失: ${roleFile}`);
 
-		const { provider, model } = activeModelEnv() ?? {};
+		const roleConfig = getRoleConfig(agent.role);
+		const activeModel = roleConfig.model ?? activeModelEnv();
+		const { provider, model } = activeModel ?? {};
 		if (!provider || !model) throw new Error("未配置模型");
-		const thinking = process.env.PENTEST_THINKING ?? "medium";
+		const thinking = roleConfig.thinking ?? process.env.PENTEST_THINKING ?? "medium";
+		const skillPaths = roleSkillPaths(agent.role);
 		const cli = resolvePiCliPath();
 		const sessionDir = projectSessionDir(agent.projectId);
 		const workspaceDir = projectWorkspaceDir(agent.projectId);
@@ -280,11 +272,28 @@ export class Supervisor {
 			// 预算基线：恢复时从这里重新计算，避免预算耗尽的 agent 恢复后立刻再次失败
 			budgetBaseTurns: 0,
 			budgetBaseTokens: 0,
+			// M6：角色级预算覆盖
+			budget: {
+				maxTurns: roleConfig.maxTurns ?? LIMITS.maxTurns,
+				maxTokens: roleConfig.maxTokens ?? LIMITS.maxTokens,
+				softRatio: LIMITS.budgetSoftRatio,
+			},
+			spawnConfig: {
+				role: agent.role,
+				model: `${provider}/${model}`,
+				thinking,
+				tools: roleConfig.tools,
+				skills: skillPaths,
+				maxTurns: roleConfig.maxTurns ?? null,
+				maxTokens: roleConfig.maxTokens ?? null,
+			},
 		};
 		const snapshot = this.store.getAgent(agent.id) ?? agent;
 		ctx.budgetBaseTurns = snapshot.turns ?? 0;
 		ctx.budgetBaseTokens = (snapshot.tokensIn ?? 0) + (snapshot.tokensOut ?? 0);
 
+		const roleArgs = ["--provider", provider, "--model", `${provider}/${model}`, "--thinking", thinking];
+		for (const skillPath of skillPaths) roleArgs.push("--skill", skillPath);
 		const client = PiRpcClient.start({
 			cli,
 			// 工具产物进 workspace，会话 JSONL 只放 sessions/，两者互不污染
@@ -294,16 +303,11 @@ export class Supervisor {
 				sessionDir,
 				"--name",
 				`${agent.role}-${agent.id.split("-").pop()}`,
-				"--provider",
-				provider,
-				"--model",
-				`${provider}/${model}`,
-				"--thinking",
-				thinking,
+				...roleArgs,
 				"--append-system-prompt",
 				roleFile,
 				"--tools",
-				ROLE_TOOLS[agent.role].join(","),
+				roleConfig.tools.join(","),
 				"--no-skills",
 				"-e",
 				PI_KIT_ENTRY,
@@ -356,6 +360,13 @@ export class Supervisor {
 			startedAt: fresh.startedAt ?? Date.now(),
 			endedAt: null,
 			error: null,
+		});
+		// 审计：记录本次 spawn 实际用的模型/工具/技能/预算
+		this.store.appendEvent({
+			projectId: agent.projectId,
+			agentId: agent.id,
+			type: "spawn.config",
+			payload: ctx.spawnConfig,
 		});
 		this.broadcast({
 			projectId: agent.projectId,
@@ -450,6 +461,7 @@ export class Supervisor {
 				this.setStatus(saved.id, "error", `汇报失败: ${String(err?.message ?? err)}`),
 			);
 		}
+		this.checkProjectUsage(saved.projectId);
 		this.pump();
 		return this.store.getAgent(agentId);
 	}
@@ -586,23 +598,24 @@ export class Supervisor {
 		if (ctx.finished) return;
 		const agent = this.store.getAgent(ctx.agent.id);
 		if (!agent) return;
+		const budget = ctx.budget ?? { maxTurns: LIMITS.maxTurns, maxTokens: LIMITS.maxTokens, softRatio: LIMITS.budgetSoftRatio };
 		const turns = agent.turns;
 		const tokens = agent.tokensIn + agent.tokensOut;
 		const usedTurns = Math.max(0, turns - (ctx.budgetBaseTurns ?? 0));
 		const usedTokens = Math.max(0, tokens - (ctx.budgetBaseTokens ?? 0));
-		const turnPct = LIMITS.maxTurns > 0 ? usedTurns / LIMITS.maxTurns : 0;
-		const tokenPct = LIMITS.maxTokens > 0 ? usedTokens / LIMITS.maxTokens : 0;
+		const turnPct = budget.maxTurns > 0 ? usedTurns / budget.maxTurns : 0;
+		const tokenPct = budget.maxTokens > 0 ? usedTokens / budget.maxTokens : 0;
 		const pct = Math.max(turnPct, tokenPct);
 
 		if (pct >= 1) {
-			const reason = `预算耗尽（本轮 turns ${usedTurns}/${LIMITS.maxTurns}，tokens ${usedTokens}/${LIMITS.maxTokens}；累计 ${turns} 轮）`;
+			const reason = `预算耗尽（本轮 turns ${usedTurns}/${budget.maxTurns}，tokens ${usedTokens}/${budget.maxTokens}；累计 ${turns} 轮）`;
 			this.failWithHandoff(agent.id, reason);
 			this.abortWithKill(ctx);
 			return;
 		}
-		if (pct >= LIMITS.budgetSoftRatio && !ctx.budgetWarned && ctx.lastStopReason === "toolUse") {
+		if (pct >= (budget.softRatio ?? LIMITS.budgetSoftRatio) && !ctx.budgetWarned && ctx.lastStopReason === "toolUse") {
 			ctx.budgetWarned = true;
-			const reminder = `【预算提醒】本轮已使用 turns ${usedTurns}/${LIMITS.maxTurns}、tokens ${usedTokens}/${LIMITS.maxTokens}。请立即收尾：输出已确认结论、未完成事项、下一步建议，然后结束本轮。`;
+			const reminder = `【预算提醒】本轮已使用 turns ${usedTurns}/${budget.maxTurns}、tokens ${usedTokens}/${budget.maxTokens}。请立即收尾：输出已确认结论、未完成事项、下一步建议，然后结束本轮。`;
 			ctx.client?.send({ type: "steer", message: reminder }).catch(() => {});
 		}
 	}

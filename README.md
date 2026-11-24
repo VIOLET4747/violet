@@ -20,6 +20,7 @@
 - **预算与 Handoff**：每 agent 轮次/token 预算，80% 软提醒、100% 中止并生成交接说明给父 Agent（M2）
 - **重启恢复**：服务硬杀重启后，中断的 Agent 标记为 `interrupted`，一键恢复原会话继续对话（M2）
 - **工具箱**：工具库页面，支持 网站 / 命令行 / 图形界面 / MCP 四种类型；命令行与 MCP 可被 AI 直接调用（`list_tools` / `run_tool`），图形界面和网站仅人工启动；输出完整落 artifact，模型只看截断文本
+- **审批 / 配额 / 成本**：shell 与高风险工具可配置人工审批（超时 fail-closed）、按项目并发配额、成本面板与阈值告警、审计日志（M7）
 - **模型自带**：不内置任何模型，首次启动填写自己的 API
 
 ## 环境要求
@@ -126,6 +127,11 @@ SQLite (.runtime/pi-pentest.db)  project / agent_run / agent_event / fact / arti
 | `PENTEST_MAX_CHILDREN` | `8` | 单项目子 agent 上限 |
 | `PENTEST_THINKING` | `medium` | 传给 `pi --thinking` 的等级 |
 | `PENTEST_RUNTIME_DIR` | `<repo>/.runtime` | 运行数据目录；验收脚本用它跑隔离实例 |
+| `PENTEST_MAX_CONCURRENCY_PER_PROJECT` | `2` | 单项目同时运行的新 agent 上限（M7） |
+| `PENTEST_APPROVAL_MODE` | `off` | `off` / `risk`（shell + 高风险工具审批）/ `all`（M7） |
+| `PENTEST_APPROVAL_TIMEOUT_MS` | `120000` | 审批等待上限，超时 fail-closed（M7） |
+| `PENTEST_PROJECT_TOKEN_LIMIT` | `0`（关） | 项目 token 预警阈值（M7） |
+| `PENTEST_PROJECT_COST_LIMIT` | `0`（关） | 项目成本预警阈值（M7） |
 
 ## 重启恢复（M2）
 
@@ -244,6 +250,29 @@ Agent 侧工具（recon / jwt 角色可用，只暴露 cmd + mcp）：
 
 ![报告](docs/screens/m5-report.png)
 
+## 角色、Skills 与字典（M6）
+
+左下角「角色」打开配置页（三个标签）：
+
+- **角色**：`commander / recon / jwt / verifier` 四个角色的模型档位（provider/model/thinking）、工具白名单（`--tools`）、技能白名单（`--skill`）、轮次/token 预算；保存到 `.runtime/roles.json`，下一轮新 agent 生效；支持恢复默认
+- **Skills**：`skills/<name>/SKILL.md`（YAML frontmatter：name + description）。仓库 `skills/` 是只读示例（recon / jwt / evidence），UI 新建的写入 `.runtime/skills/`；spawn 时用 `--no-skills` 关掉自动发现，只按角色白名单显式 `--skill <dir>` 注入
+- **字典**：`.runtime/wordlists/<name>.txt` 管理（行数统计、编辑、删除），供工具 argv 以绝对路径引用
+
+每次 spawn 会写一条 `spawn.config` 审计事件（实际模型/thinking/工具/技能目录/预算），可用 `GET /api/agents/:id/config` 查看。
+
+![角色与技能](docs/screens/m6-roles.png)
+
+## 审批、配额、成本与 SARIF（M7）
+
+- **工具审批队列**：开启 `PENTEST_APPROVAL_MODE=risk` 后，`powershell/bash` 与高风险 `run_tool` 会在执行前阻塞；UI 右下角弹出审批卡片（工具/参数/风险/agent），可批准/拒绝。也可以走 API：`GET /api/approvals`、`POST /api/approvals/:id/decide`
+- **超时 fail-closed**：无人决策超过 `PENTEST_APPROVAL_TIMEOUT_MS`（默认 120s）自动 `expired`，工具被 block（子 agent 会收到"未通过审批"）
+- **审计日志**：`.runtime/audit.log`（append-only JSONL），记录审批请求/批准/拒绝/过期；`GET /api/audit`
+- **按项目并发配额**：`PENTEST_MAX_CONCURRENCY_PER_PROJECT`（默认 2）限制单项目同时运行的新 agent，超出的排队；父 agent 被通知唤醒时可能短暂多 1 个（避免死锁）
+- **成本与用量**：`GET /api/usage` 聚合项目/角色/agent 的 tokens、成本、轮次；`PENTEST_PROJECT_TOKEN_LIMIT` / `PENTEST_PROJECT_COST_LIMIT` 设阈值后，超限会广播 `usage.warning`（UI「成本」面板高亮）
+- **SARIF 导出**：报告页新增 `report.sarif`（SARIF 2.1.0），可直接进 GitHub Code Scanning / CI
+
+![成本与用量](docs/screens/m7-cost.png)
+
 ## 验收
 
 验收脚本放在**仓库外**（避免污染项目目录），使用独立 runtime 和端口，不影响日常实例：
@@ -257,6 +286,8 @@ node --no-warnings run-m3.mjs      # M3：工具注册表/执行器/artifact + a
 node --no-warnings run-toolbox.mjs # 工具箱：四种类型/直接启动/MCP/AI 用 MCP+命令行（隔离端口 8797）
 node --no-warnings run-m4.mjs      # M4：证据闸门 + verifier 重放 + 覆盖率（隔离端口 8796；--agent 跑真实模型）
 node --no-warnings run-m5.mjs      # M5：报告 md/html/pdf + poc.zip + 新机器 python repro.py（隔离端口 8795）
+node --no-warnings run-m6.mjs      # M6：角色配置 / Skills 白名单 / 字典 + spawn 审计（隔离端口 8794）
+node --no-warnings run-m7.mjs      # M7：审批 fail-closed / 项目配额 / 成本告警 / SARIF（隔离端口 8793）
 ```
 
 前置：靶场在跑、主平台（8787）已配置模型。M2/M3 脚本会复制主实例的模型配置到隔离 runtime。
@@ -267,28 +298,34 @@ M3 断言：YAML 工具增删改 + 下一轮可用、3MB 输出落 artifact 且�
 工具箱断言：四种类型 CRUD、分类计数、cmd 后台启动 + artifact、website/gui 干跑、MCP 连接/列 tools/调用、子 agent 通过 `run_tool` 调用 MCP 与命令行工具并写事实。
 M4 断言：http_send 请求/响应原文落 artifact + sha256 + scope 拦截；伪造证据/无 HTTP 证据/越权 target/字段不全的 finding 被拒、重复去重；复用旧证据被拒；新证据重放命中 expect → verified、不命中 → disputed；覆盖率三态与 ruled_out 控制点校验。
 M5 断言：md/html/pdf 三格式可下载且含 finding/证据/覆盖率/授权；候选默认排除；poc.zip 结构完整（repro.py 只用标准库）；解压到独立目录 `python repro.py` PASS、`verify.py` 退出码 0；evidence.zip 含 manifest 与 sha256。
+M6 断言：四个角色默认配置/覆盖/非法值拒绝/重置；repo 技能可见、运行时技能 CRUD 与 frontmatter 校验；字典 CRUD；角色覆盖 + 技能白名单真正进入 spawn（`GET /api/agents/:id/config` 可审计）。
+M7 断言：shell 工具触发审批并可批准继续；无人决策超时 expired 且工具被 block；单项目并发 ≤ 配额（超出排队）；成本聚合与超限标记；SARIF 2.1.0 含 verified finding；审计日志记录审批事件。
 
 ## 已知限制
 
-- Agent 的 shell 工具直接跑在本机，没有审批弹窗与 scope 拦截（M4/M5）
+- **容器出网白名单没做**：审批只能拦"执行前"，不能在内核/网络层阻止越界请求；shell 工具仍直接跑在本机（M7 未完成项）
+- `PENTEST_APPROVAL_MODE` 默认 `off`（避免打断无人值守流程），需要显式开启审批；审批记录不按"本 agent 永久放行"记忆，每条 shell 都要点一次（后续可加 allowlist）
 - `runner: docker` 已实现，但本机 Docker daemon 未运行，**未做端到端验证**；nmap/httpx/nuclei 示例指向 `pi-pentest-toolbox:latest`，需要自行准备镜像或改成 `runner: host`
 - MCP 支持 stdio / http / sse 三种传输，本机只验证了 **stdio**；MCP Server 与命令行工具一样在本机执行，没有沙箱隔离
 - 网站 / 图形界面工具只供人工启动，不会暴露给 AI
 - GUI 启动后不托管日志/状态（只记录 pid）
-- 工具执行没有并发配额（全局 agent 并发限制仍然生效）
 - 证据链没有 mitmproxy 旁路抓包（M4 只做平台侧 request/response 原文 + sha256），也不能防"模型直接篡改工具日志"之外的本机级作弊
 - verifier 的 `poc.expect` 目前只支持 status / body_regex / header_regex，没有 timing / 截图比对
-- 报告没有 SARIF 导出；报告里的"修复建议"是按 category 的确定性模板，不是逐条 LLM 润色
+- 报告里的"修复建议"是按 category 的确定性模板，不是逐条 LLM 润色
 - PoC 里的 HTTP headers 未脱敏（默认原样导出，分享前请自行检查是否有 token/cookie）
 - 事件回放只覆盖已落库的消息，流式 delta 不落库（刷新后看不到"正在生成"的中间态）
-- 重启恢复是手动触发，不会自动续跑中断的任务
-- 角色有 commander / recon / jwt / verifier 四个
+- 重启恢复是手动触发，不会自动续跑中断的任务；**dev 服务重启会把正在跑的 agent 标记为 interrupted**
+- 角色有 commander / recon / jwt / verifier 四个，角色配置只影响下一轮新 spawn 的 agent
+- Skills 只在 spawn 时按白名单注入；运行中的 agent 不会热加载技能
+- 字典只做管理与路径暴露，还没和内置工具的参数模板自动关联
+- MCP 的「按角色授权 / session_start 动态注册」还没做（M6 剩余项，工具箱/MCP 由并行工作线完成）
 - 项目目前只有**单目标字段**：填多个地址只能靠模型自行理解，系统级多目标建模尚未做
 
 ## 后续计划
 
-- M6：审批/scope 拦截、多目标建模、MCP 市场/模板
-- M7：更多角色 / skills 体系、SARIF / CI 集成
+- M6 剩余：MCP 按角色授权 / session_start 动态注册、多目标建模
+- M7 剩余：容器出网白名单（mitmproxy/iptables）、审批 allowlist（按 agent/项目记忆）、审计查询 UI
+- M8：多用户/租户（如需要）、成本告警通知渠道（webhook）
 
 ## 常见问题
 

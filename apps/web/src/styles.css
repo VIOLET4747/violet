@@ -2348,6 +2348,219 @@ select:focus {
 	border-radius: 0 0 10px 10px;
 }
 
+/* 角色与技能 */
+.roles-page {
+	position: fixed;
+	inset: 0;
+	z-index: 60;
+	background: var(--bg);
+}
+
+.roles-layout {
+	display: flex;
+	gap: 16px;
+	padding: 16px 20px;
+	overflow: auto;
+	height: 100%;
+}
+
+.roles-layout .tools-list {
+	width: 190px;
+	border-right: 0;
+	padding: 0;
+}
+
+.roles-form {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.roles-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px 14px;
+	margin-top: 10px;
+}
+
+.roles-grid label {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	font-size: 11px;
+	color: var(--faint);
+}
+
+.roles-grid input,
+.roles-grid select,
+.tools-input {
+	background: #0a0c10;
+	border: 1px solid var(--border);
+	border-radius: 7px;
+	padding: 8px 10px;
+	font-size: 12px;
+	color: var(--text);
+	font-family: inherit;
+}
+
+.check-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+	gap: 6px 12px;
+	margin-top: 8px;
+}
+
+.check-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--dim);
+}
+
+.check-item input {
+	accent-color: #3b82f6;
+}
+
+/* M7：审批 + 成本 */
+.approval-stack {
+	position: fixed;
+	right: 18px;
+	bottom: 18px;
+	z-index: 80;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	max-width: 380px;
+}
+
+.approval-card {
+	background: #151a23;
+	border: 1px solid rgba(226, 179, 65, 0.45);
+	border-radius: 10px;
+	padding: 12px;
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.approval-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12.5px;
+	color: var(--text);
+}
+
+.approval-meta {
+	font-size: 11px;
+	color: var(--faint);
+}
+
+.approval-args {
+	margin: 0;
+	background: #0a0c10;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	padding: 8px;
+	font-family: var(--mono);
+	font-size: 10.5px;
+	max-height: 160px;
+	overflow: auto;
+	white-space: pre-wrap;
+	color: #b7bcc7;
+}
+
+.approval-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+}
+
+.cost-modal {
+	width: 860px;
+}
+
+.cost-body {
+	padding: 14px;
+	overflow: auto;
+	max-height: calc(100vh - 140px);
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.cost-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 10px;
+}
+
+.cost-card {
+	border: 1px solid var(--border);
+	border-radius: 9px;
+	padding: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.cost-label {
+	font-size: 10.5px;
+	color: var(--faint);
+}
+
+.cost-value {
+	font-size: 20px;
+	color: var(--text);
+	font-variant-numeric: tabular-nums;
+}
+
+.cost-sub {
+	font-size: 10.5px;
+	color: var(--faint);
+}
+
+.cost-bar {
+	height: 6px;
+	background: #0a0c10;
+	border-radius: 999px;
+	overflow: hidden;
+	margin: 4px 0;
+}
+
+.cost-bar span {
+	display: block;
+	height: 100%;
+	background: var(--green);
+}
+
+.cost-bar span.warn {
+	background: var(--yellow);
+}
+
+.cost-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 11.5px;
+	margin-top: 8px;
+}
+
+.cost-table th,
+.cost-table td {
+	text-align: left;
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--border);
+}
+
+.cost-table th {
+	color: var(--faint);
+	font-weight: 500;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar {
 	width: 8px;
